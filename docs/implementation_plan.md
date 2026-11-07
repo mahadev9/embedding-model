@@ -368,6 +368,71 @@ Takeaways:
 
 Contamination: hold out evaluation sets before building any training mix, and deduplicate against them.
 
+### 6.1 Audit results (2026-11-07, `python -m src.data.audit`)
+
+Licenses, from the dataset cards: FineWeb-2 **odc-by**, FineWeb-Edu **odc-by**, Wikipedia
+**cc-by-sa-3.0 / gfdl** (share-alike, so keep it out of anything you plan to relicense; it is also small
+next to the web data), DCLM **cc-by-4.0** (not used so far). The MIRACL, Mr. TyDi, mMARCO and NLLB licenses
+are still unchecked.
+
+FineWeb-2 has no English, so English comes from FineWeb-Edu (a 10B-token sample is enough).
+
+| Language | FineWeb-2 config | Train shards | Parquet size | Rows (documents) | Wikipedia (parquet) |
+|---|---|---|---|---|---|
+| en | (FineWeb-Edu `sample/10BT`) | n/a | n/a | n/a | 10.8 GiB |
+| zh | cmn_Hani | 370 | 1510.6 GiB | 636M | 1.6 GiB |
+| es | spa_Latn | 146 | 593.8 GiB | n/a | 3.3 GiB |
+| fr | fra_Latn | 135 | 502.8 GiB | 360M | 4.3 GiB |
+| de | deu_Latn | 181 | 719.1 GiB | 496M | 5.4 GiB |
+| pt | por_Latn | 66 | 256.9 GiB | 200M | 1.5 GiB |
+| ru | rus_Cyrl | 440 | 1851.1 GiB | 699M | 4.5 GiB |
+| ja | jpn_Jpan | 175 | 667.4 GiB | 400M | 3.7 GiB |
+| ar | arb_Arab | 25 | 98.7 GiB | 62M | 1.2 GiB |
+| hi | hin_Deva | 8 | 31.9 GiB | 22M | 0.2 GiB |
+| ko | kor_Hang | 25 | 98.5 GiB | 61M | 0.7 GiB |
+| it | ita_Latn | 85 | 332.5 GiB | 239M | 2.7 GiB |
+
+Conclusions:
+- **Every language has far more text than we can train on.** Even Hindi, the smallest, is about 22M documents.
+  The binding constraint is our 25–40B token budget and disk, not data availability. With α = 0.5 sampling,
+  the small languages (hi, ar, ko) are upsampled relative to their share, but they are not exhausted.
+- FineWeb-2 shards are about 4 GiB each, with uneven sizes (some trailing shards are small), so downloads
+  should be by shard count, not by language.
+- Rough raw-text need for 30B tokens is on the order of 120 GB (about 4 bytes per token on average, higher
+  for CJK and Devanagari), so about 60–80 GB of zstd parquet after download. This fits the 200–300 GB budget,
+  provided raw shards are deleted after tokenization.
+
+### 6.2 Local data layout and download script
+
+Small and derived data lives under `data/` (gitignored). Bulk raw downloads can be redirected to another disk
+by setting `EMBEDDING_RAW_DIR`. On this machine the 1.9 TB HDD is available:
+
+```bash
+export EMBEDDING_RAW_DIR=/mnt/hdd-2tb/embedding-model/raw
+```
+
+Hugging Face caches follow `RAW_DIR` (your stored login token is still used). To remove everything:
+`rm -rf data/ $EMBEDDING_RAW_DIR`. Training reads tokenized data at only about 160 KB/s for the 200M model
+(80k tokens/s x 2 bytes), so even the HDD is fast enough for the tokenized corpus.
+
+```
+data/                              (repo, local SSD)
+  audit/sources.json               output of src.data.audit
+  sample/<lang>.parquet            ~300 MB of text per language, for tokenizer training
+$EMBEDDING_RAW_DIR/                (default data/raw; HDD recommended)
+  <source>/<lang>/...              whole shards for the main corpus (src.data.download shards)
+  .hf_cache/                       Hugging Face caches
+```
+
+`src/data/download.py`:
+- `sample` streams only the first pages of randomly ordered shards (no multi-GiB download), until the text
+  budget per language is met. Rerunning skips files that exist.
+- `shards` downloads whole parquet shards for a source and languages (`--source fineweb2 | fineweb-edu |
+  wikipedia`, `--langs`, `--num-shards`, `--random`).
+
+Tokenizer sample downloaded: 12 languages x ~300 MB of text (about 1.4 GB on disk). Languages are balanced by
+text bytes, so no language dominates the vocabulary.
+
 ---
 
 ## 7. Evaluation plan

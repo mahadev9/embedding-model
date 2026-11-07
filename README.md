@@ -24,5 +24,12 @@ python -m src.model.config                      # print parameter counts for all
 python -m src.benchmarks.throughput attention   # attention kernel benchmark
 python -m src.benchmarks.model_throughput --sizes 50m   # real-model MLM throughput
 
+python -m src.data.audit                        # source sizes and licenses (API only)
+python -m src.data.download sample --mb 300     # ~300 MB text per language, into data/
+rm -rf data/                                    # remove all downloaded data
+
+# Optional: send bulk raw shards to another disk (caches follow it)
+export EMBEDDING_RAW_DIR=/mnt/hdd-2tb/embedding-model/raw
+
 ruff format src && ruff check src               # format and lint
 ```

@@ -12,6 +12,8 @@ dependencies = [
     # CUDA 13.0 build; install with --extra-index-url https://download.pytorch.org/whl/cu130
     "torch==2.14.1",
     "pyyaml==6.0.3",
+    "huggingface_hub==2.4.0",
+    "pyarrow==26.0.1",
 ]
 
 [project.optional-dependencies]
