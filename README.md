@@ -28,10 +28,12 @@ python -m src.data.audit                        # source sizes and licenses (API
 python -m src.data.download sample --mb 300     # ~300 MB text per language, into data/
 python -m src.tokenizer.train --mb-per-lang 50  # BPE candidates (48k/64k/96k/128k), ~2.5 min
 python -m src.tokenizer.evaluate                # compare candidates with public tokenizers
+python -m src.data.build_corpus --total-tokens 10e9   # download + tokenize the pretraining corpus
 rm -rf data/                                    # remove all downloaded data
 
 # Optional: send bulk raw shards to another disk (caches follow it)
 export EMBEDDING_RAW_DIR=/mnt/hdd-2tb/embedding-model/raw
+export EMBEDDING_TOKENIZED_DIR=/mnt/hdd-2tb/embedding-model/tokenized
 
 ruff format src && ruff check src               # format and lint
 ```

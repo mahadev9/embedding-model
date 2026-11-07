@@ -414,13 +414,19 @@ avoid partial FlexAttention blocks.
 | 200M | 1024 | ~400 tokens | 87k | ~7.5B | 16.9 GB at 16k tokens/batch |
 | 200M | 8192 | ~400 tokens | 83k | ~7.2B | 16.9 GB at 16k tokens/batch |
 | 200M | 8192 | one 8192-token doc | 64k | ~5.5B | 16.9 GB at 16k tokens/batch |
+| **With the 96k vocabulary and realistic documents (~1,000 tokens, as in the corpus):** | | | | | |
+| 50M | 1024 | ~1000 tokens | 244k | ~21B | 15.5 GB at 32k tokens/batch |
+| 50M | 8192 | ~1000 tokens | 214k | ~18.5B | 15.5 GB at 32k tokens/batch |
+| 200M | 1024 | ~1000 tokens | 83k | ~7.1B | 17.5 GB at 16k tokens/batch |
+| 200M | 8192 | ~1000 tokens | 76k | ~6.6B | 17.5 GB at 16k tokens/batch |
 
-Each step builds a fresh batch (new documents and masks) and includes mask building, as in real training.
+The rows above the bold line used a 64k vocabulary and 400-token documents. Each step builds a fresh batch (new documents and masks) and includes mask building, as in real training.
 The first benchmark (previous revision) reused the same label count every step, which hid a recompile and
 two graph-break problems; fixing them also cut memory by about 3 GB and raised throughput slightly.
 
 Takeaways:
-- Packing short documents into 8192-token rows costs only 4–8% extra per token, because the mask skips
+- Packing short documents into 8192-token rows costs only 4–8% extra per token (4–12% with the corpus's
+  ~1,000-token documents), because the mask skips
   cross-document blocks. Pretraining at 8192 on packed short text is nearly as cheap as at 1024.
 - Long single documents are the expensive case (the 200M drops to 64k tokens/s). The extension stage should
   budget for that, since long documents are what it trains on.
@@ -532,8 +538,8 @@ text bytes, so no language dominates the vocabulary.
 ## 8. Milestones
 
 1. **M0 Environment and data audit:** confirm the 12 languages, per-language FineWeb-2 sizes, and licenses.
-2. **M1 Tokenizer:** candidates trained and evaluated (10.5), 96k chosen and set in the YAMLs. Remaining:
-   tokenize the corpus.
+2. **M1 Tokenizer and corpus:** candidates trained and evaluated (10.5), 96k chosen and set in the YAMLs,
+   10B-token corpus built and verified (10.6).
 3. **M2 Model and MLM loop at 50M:** model code, correctness checks and the packing throughput check are
    done (5.6). The MLM training loop, data loader and a short sanity run remain.
 4. **M3 50M ablations** (section 3.3), then a full 50M pretraining run.
@@ -720,6 +726,85 @@ tokens per word tables are in `data/tokenizer/report.md` (generated, not committ
 128k adds only 3.8% more compression for +12M parameters and a 4% throughput loss at 50M. 64k was the
 fallback if total model size mattered most (the 50M would be 76M total instead of 89M). Applied to the
 model YAMLs (`vocab_size: 96000`) and the `ModelConfig` default.
+
+### 10.6 Tokenized corpus (first 10B tokens)
+
+Code: `src/data/build_corpus.py`. Commands (the two environment variables put the bulk data on the HDD):
+
+```bash
+export EMBEDDING_RAW_DIR=/mnt/hdd-2tb/embedding-model/raw
+export EMBEDDING_TOKENIZED_DIR=/mnt/hdd-2tb/embedding-model/tokenized
+python -m src.data.build_corpus --total-tokens 10e9 --plan-only   # estimate availability, show the mix
+python -m src.data.build_corpus --total-tokens 10e9               # download, tokenize, delete raw shards
+```
+
+**Format.** Per language, `train.bin` and `val.bin`: little-endian **uint32** token ids (the 96k vocabulary
+does not fit in 16 bits, so 10B tokens is about 40 GB, not 20). Each document is `[CLS] tokens [SEP]`
+(ids 2 and 3), so document boundaries are recoverable from the CLS ids. Every 500th document goes to
+`val.bin`. The tokenizer and a manifest with its SHA-256 are copied next to the data. The run is resumable
+(per-language `progress.json`) and deletes each raw shard after tokenizing it.
+
+**Language mix.** Quota per language is proportional to available tokens to the power alpha = 0.5, capped at
+half of what a language has. Availability is estimated by tokenizing one downloaded shard per language and
+scaling by the total shard bytes.
+
+**English share correction.** With English limited to FineWeb-Edu's 10B-token sample, alpha = 0.5 gave
+English only 5.3% of the corpus. mmBERT used 10–34%, and English tasks are a large part of MTEB. FineWeb-Edu
+also has a 100B-token sample, so English availability was under-stated, not the mix rule wrong. Using
+`sample/100BT` gives English 15.3%. The mix for 10B tokens:
+
+| Language | Available (est.) | Quota | Share |
+|---|---|---|---|
+| en | 112.9B | 1.53B | 15.3% |
+| zh | 52.0B | 1.04B | 10.4% |
+| es | 39.4B | 0.90B | 9.0% |
+| fr | 35.0B | 0.85B | 8.5% |
+| de | 51.5B | 1.03B | 10.3% |
+| pt | 15.8B | 0.57B | 5.7% |
+| ru | 143.3B | 1.72B | 17.2% |
+| ja | 30.5B | 0.79B | 7.9% |
+| ar | 6.6B | 0.37B | 3.7% |
+| hi | 2.0B | 0.21B | 2.1% |
+| ko | 4.9B | 0.32B | 3.2% |
+| it | 22.1B | 0.68B | 6.8% |
+
+**Result (built 2026-11-07, about 1 h 20 min at 2.5–3.5M tokens/s; tokenization on 16 cores is the
+bottleneck).** 10.02B training tokens and 20.4M validation tokens, 38 GB on the HDD:
+
+| Language | Train tokens | Documents | Tokens per document |
+|---|---|---|---|
+| en | 1.53B | 1.37M | ~1,120 |
+| zh | 1.04B | 1.03M | ~1,010 |
+| es | 0.90B | 0.92M | ~985 |
+| fr | 0.85B | 0.84M | ~1,015 |
+| de | 1.03B | 1.10M | ~935 |
+| pt | 0.57B | 0.62M | ~930 |
+| ru | 1.72B | 0.87M | ~1,990 |
+| ja | 0.80B | 0.96M | ~830 |
+| ar | 0.37B | 0.35M | ~1,055 |
+| hi | 0.21B | 0.22M | ~960 |
+| ko | 0.32B | 0.31M | ~1,025 |
+| it | 0.68B | 0.70M | ~970 |
+
+Checks run on the output: every file size equals the recorded token count times 4; all ids are below 96,000
+(max 95,999); documents start with `[CLS]` and end with `[SEP]`; a decoded document per language reads as
+clean text (including hi, ar, zh, ja, ko). Documents average about 1,000 tokens (Russian about 2,000), more than
+the 400 assumed in the earlier throughput benchmark, so the benchmark was re-run with 1,000 (5.6). The corpus can be grown later (see below).
+
+**Corpus size decision (2026-11-07): extend to 40B tokens.** The 10B corpus is smaller than the planned runs
+(about 30B for the main 50M and 200M runs, up to 100B for the optional long 50M run), which would mean 3
+and 10 epochs. The best evidence found (Muennighoff et al., decoder language models, not verified for MLM
+encoders) is that up to about 4 epochs of repetition costs little, with returns decaying after that. At 40B
+a 30B run is under one epoch and a 100B run is 2.5. 40B is also about the ceiling for this mix: at alpha 0.5
+Hindi would use 40% of the data it has and Korean 26%; at 80B both hit the 50% cap and the mix would need
+rebalancing. Per-language quotas at 40B: en 6.1B, ru 6.9B, zh 4.1B, de 4.1B, es 3.6B, fr 3.4B, ja 3.2B, it 2.7B,
+pt 2.3B, ar 1.5B, ko 1.3B, hi 0.8B.
+
+**Growing and pinning.** The corpus files only ever grow (append-only, fixed seeded shard order). To extend,
+move `plan.json` aside and rerun with a larger `--total-tokens`. To make experiments reproducible across
+growth, `--snapshot NAME` records each language's token counts to `snapshots/NAME.json`; readers use only up
+to those counts. `snapshots/corpus_10B.json` (10,016,130,123 train tokens) pins the first 10B, which the 50M
+ablations use while the extension runs in the background at low CPU priority (`nice`).
 
 ### 10.4 Still open (deferred until needed)
 

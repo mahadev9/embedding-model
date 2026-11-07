@@ -36,7 +36,9 @@ from .languages import (  # noqa: E402
     WIKIPEDIA_SNAPSHOT,
 )
 
-FINEWEB_EDU_SUBSET = "sample/10BT"  # 10B-token sample; plenty for English at our budget
+FINEWEB_EDU_SUBSET = (
+    "sample/100BT"  # 100B-token sample (10BT gave English only ~5% under alpha 0.5)
+)
 
 
 def parquet_files(api: HfApi, repo: str, path: str) -> list[str]:

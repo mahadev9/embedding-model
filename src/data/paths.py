@@ -5,8 +5,8 @@ e.g. on a large HDD:
 
     export EMBEDDING_RAW_DIR=/mnt/hdd-2tb/embedding-model/raw
 
-The Hugging Face caches follow RAW_DIR. Small and derived data (audit, tokenizer sample, tokenizer,
-tokenized corpus) stays under DATA_DIR.
+The tokenized corpus can be moved the same way with EMBEDDING_TOKENIZED_DIR. The Hugging Face caches
+follow RAW_DIR. Small data (audit, tokenizer sample, tokenizer) stays under DATA_DIR.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data"
 RAW_DIR = Path(os.environ.get("EMBEDDING_RAW_DIR", DATA_DIR / "raw"))
+TOKENIZED_DIR = Path(os.environ.get("EMBEDDING_TOKENIZED_DIR", DATA_DIR / "tokenized"))
 SAMPLE_DIR = DATA_DIR / "sample"  # ~300 MB of text per language, for tokenizer training
 AUDIT_DIR = DATA_DIR / "audit"
 HF_CACHE_DIR = RAW_DIR / ".hf_cache"
