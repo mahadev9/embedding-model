@@ -21,7 +21,7 @@ depending on them.
 | Sizes | 50M, 100M, 200M **non-embedding** parameters. 200M is the main target, 100M is optional and last |
 | Start with | **50M**: a cheap end-to-end pipeline test and the platform for ablations |
 | Languages | 12 languages (confirmed by user): en, zh, es, fr, de, pt, ru, ja, ar, hi, ko, it |
-| Tokenizer | Custom, shared by all sizes, 64k–100k vocabulary, vocabulary size a multiple of 64 |
+| Tokenizer | Custom, shared by all sizes. Candidate sizes 48k / 64k / 96k / 128k, vocabulary size a multiple of 64 (see section 10) |
 | Output embedding | 768 dimensions, Matryoshka (MRL) so it can be truncated to 512/256/128 |
 | Context | Train short, extend to 8192. 32k only via inference-time RoPE scaling if wanted |
 | Architecture family | Dense bidirectional encoder, ModernBERT-style, trained from scratch |
@@ -357,7 +357,7 @@ Takeaways:
 
 | Purpose | Dataset | License / note |
 |---|---|---|
-| MLM, multilingual | [FineWeb-2](https://huggingface.co/datasets/HuggingFaceFW/fineweb-2) | ODC-By 1.0. Check per-language sizes for the 12 languages |
+| MLM, multilingual | [FineWeb2-HQ-Plus](https://huggingface.co/datasets/epfml/FineWeb2-HQ-Plus) (preferred, see section 10) or [FineWeb-2](https://huggingface.co/datasets/HuggingFaceFW/fineweb-2) | Both odc-by. HQ-Plus is the top 10% of FineWeb-2 by a quality classifier |
 | MLM, English quality | FineWeb-Edu or DCLM, Wikipedia | Check licenses before use |
 | Weak pairs, English | [nomic-embed-unsupervised-data](https://huggingface.co/datasets/nomic-ai/nomic-embed-unsupervised-data), [sentence-transformers/embedding-training-data](https://huggingface.co/datasets/sentence-transformers/embedding-training-data) | Mostly English |
 | Weak pairs, multilingual | Mined by us from FineWeb-2 and Wikipedia (title–body, adjacent passages) | multilingual-e5 used Wikipedia, mC4, CC News and NLLB for this |
@@ -479,7 +479,98 @@ text bytes, so no language dominates the vocabulary.
 
 ---
 
-## 10. Sources
+## 10. Research round 2 (2026-11-07): tokenizer, data quality, evaluation
+
+### 10.1 Tokenizer design
+
+What the evidence says, and what it doesn't:
+- **BPE vs Unigram:** no clear winner. One 2025 study of cross-lingual tokenizer inequities found no
+  significant difference in token premiums between them. A Telugu study found Unigram better downstream. A
+  multilingual design study found Unigram only slightly worse than BPE at 32k but degrading as the vocabulary
+  grows. *(paper/blog snippets)*
+- **Vocabulary size:** a multilingual tokenizer design study found 128k the most balanced. Tao et al. (NeurIPS
+  2024) show the optimal vocabulary grows with model size and that many models use too small a vocabulary,
+  but their models are decoders (33M–3B) and not multilingual. *(paper)*
+- **Parity-aware BPE** improves compression fairness across languages, but its variants trail classical BPE on
+  CJK. *(paper)*
+- **Byte fallback and digits:** GPT-SW3 used byte fallback, character coverage 0.9999, and single-digit
+  tokens. Llama 2's tokenizer triggers many byte fallbacks on CJK. *(paper)*
+- **Unicode normalization:** no evidence found. My default is NFKC (sentencepiece's default for XLM-R-style
+  tokenizers): it folds full-width CJK and Latin characters, but check what it does to Arabic and Devanagari
+  before committing. *(mine)*
+
+Plan for the tokenizer step:
+1. Candidates: BPE at 48k, 64k, 96k, 128k (Unigram as a secondary comparison), byte fallback on, digits split,
+   character coverage ~0.9999, balanced by text bytes across the 12 languages.
+2. Metrics: **bytes per token** and **characters per token** per language (words per token is ill-defined for
+   zh and ja), plus tokens per word for the space-delimited languages.
+3. Baselines measured on our sample: XLM-R (250k), Gemma (256k), Qwen3 (~151k), Llama 3 (128k), ModernBERT
+   (50k). This shows what a good number looks like.
+4. Embedding cost of the choice: at hidden 384, a 128k vocabulary is ~49M embedding parameters, about equal
+   to the whole 50M body. Embedding lookups cost almost no compute and the MLM head only projects masked
+   tokens, so the cost is memory and parameter count, not speed. Report both total and non-embedding sizes.
+
+### 10.2 Data quality: use FineWeb2-HQ-Plus for the non-English languages
+
+- [FineWeb2-HQ-Plus](https://huggingface.co/datasets/epfml/FineWeb2-HQ-Plus) is the top 10% of FineWeb-2
+  (v2.1.1) by a multilingual quality classifier, covering 100 languages, license odc-by. It covers all 11
+  non-English target languages. (The original FineWeb2-HQ has 20 languages and lacks Hindi and Korean.)
+- The authors report the original HQ matches FineWeb-2 with about 6x fewer tokens for decoder LLM
+  pretraining. For MLM encoders this is unproven. NeoBERT's results point the same way (data quality was its
+  largest ablation gain), so it is worth testing. *(blog/dataset card)*
+- Layout is `<lang>/NNN_NNNNN.parquet` (no `train/` folder). Sizes (parquet):
+
+| Language | Files | Size |
+|---|---|---|
+| zh (cmn_Hani) | 680 | 174.6 GiB |
+| ru (rus_Cyrl) | 840 | 304.3 GiB |
+| de (deu_Latn) | 337 | 132.8 GiB |
+| es (spa_Latn) | 278 | 119.9 GiB |
+| fr (fra_Latn) | 243 | 98.4 GiB |
+| ja (jpn_Jpan) | 315 | 96.0 GiB |
+| it (ita_Latn) | 157 | 60.6 GiB |
+| pt (por_Latn) | 122 | 50.5 GiB |
+| ar (arb_Arab) | 45 | 18.4 GiB |
+| ko (kor_Hang) | 45 | 17.2 GiB |
+| hi (hin_Deva) | 15 | 6.9 GiB |
+
+- Is it enough? Rough estimate *(mine)*: with α = 0.5 sampling and a 30B token budget, Hindi's share is about
+  0.7B tokens, and 6.9 GiB of parquet is a few billion tokens, so no language needs repeating.
+- `src/data/download.py` now accepts `--source fineweb2-hq-plus`. The tokenizer sample currently on disk came
+  from plain FineWeb-2, so it should be regenerated from HQ-Plus before tokenizer training, so the
+  tokenizer sees the same distribution as the pretraining data.
+- Add a 50M ablation: FineWeb-2 vs HQ-Plus at the same token budget.
+
+### 10.3 Evaluation coverage and the real bar to beat
+
+- **MIRACL** has 18 languages (16 known plus 2 revealed later). Italian and Portuguese are not among the known
+  ones. German's status is unconfirmed here. **Mr. TyDi** (ar, bn, en, fi, id, ja, ko, ru, sw, te, th) has
+  none of es, fr, de, pt, it, zh, hi. So retrieval training and evaluation data for Italian and Portuguese must
+  come from elsewhere (MTEB-BR exists for Brazilian Portuguese; Italian is unchecked).
+- **MMTEB** has 500+ tasks across 250+ languages. I found no per-language task counts for our 12. The `mteb`
+  package can filter tasks by language, which we need to do, and then run every baseline on the same subset.
+- **Official numbers**, MTEB(Multilingual, v2) mean over tasks, from the EmbeddingGemma paper (third-party
+  snapshot): EmbeddingGemma-300m 61.2, gte-multilingual-base 58.2 (305M), multilingual-e5-base 57.0 (278M),
+  multilingual-e5-small 55.8 (118M). These are averages over all languages, so **they are not comparable to
+  scores on our 12-language subset**. Run each baseline on our subset ourselves.
+- **Size classes, by non-embedding parameters** *(mine, from vocabulary x hidden size)*: multilingual-e5-small
+  is 118M total but about 96M of that is its 250k-token embedding table (about 21M non-embedding).
+  multilingual-e5-base and gte-multilingual-base have roughly 86M and 113M non-embedding parameters, and
+  EmbeddingGemma-300m about 107M. So our 100M model has a similar transformer body to the "300M-class"
+  models, and our 200M has about twice the body, with a total of about 250M. State both numbers when
+  comparing ("200M non-embedding, ~250M total").
+- **Runtime:** MMTEB reports up to two days on one A100 for moderate LLMs on the original English benchmark,
+  and uses downsampling to cut cost. A small model's runtime is unknown. Time one on a few tasks first.
+
+### 10.4 Still open (deferred until needed)
+
+Hyperparameter transfer from 50M to 200M, token budget scaling for small multilingual encoders, verified
+StableAdamW values, contrastive pair-data licenses (MIRACL, mMARCO, NLLB and others), teacher and
+synthetic-data LLM choice and license.
+
+---
+
+## 11. Sources
 
 - [ModernBERT](https://arxiv.org/html/2412.13663)
 - [mmBERT](https://arxiv.org/html/2509.06888v1)
