@@ -34,6 +34,9 @@ rm -rf data/                                    # remove all downloaded data
 # Optional: send bulk raw shards to another disk (caches follow it)
 export EMBEDDING_RAW_DIR=/mnt/hdd-2tb/embedding-model/raw
 export EMBEDDING_TOKENIZED_DIR=/mnt/hdd-2tb/embedding-model/tokenized
+export EMBEDDING_RUNS_DIR=/mnt/hdd-2tb/embedding-model/runs
+
+python -m src.training.mlm --config configs/train/mlm_50m.yaml --run-name my-run   # MLM pretraining
 
 ruff format src && ruff check src               # format and lint
 ```

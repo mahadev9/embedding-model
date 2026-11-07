@@ -221,3 +221,6 @@ __marimo__/
 
 # Downloaded and derived data (delete with: rm -rf data/)
 /data/
+
+# Training runs: checkpoints and logs
+/runs/

@@ -1,0 +1,36 @@
+# Stage 1 MLM pretraining, 50M model. Defaults are recorded in docs/implementation_plan.md (5.7).
+model: 50m
+
+data:
+  snapshot: corpus_10B # pins the data; loaders never read past these counts
+  seq_len: 1024
+  mask_rate: 0.30
+  run_rows: 16 # consecutive rows per disk read (HDD friendly)
+
+batch:
+  tokens_per_step: 524288 # 512 rows of 1024
+  micro_tokens: 32768 # gradient accumulation: 16 micro-batches per step
+
+optim:
+  lr: 8.0e-4 # sweep first: 2e-4, 4e-4, 8e-4, 1.6e-3
+  betas: [0.9, 0.98]
+  eps: 1.0e-6
+  weight_decay: 1.0e-5
+
+schedule:
+  total_tokens: 3.0e10
+  warmup_fraction: 0.01
+  min_warmup_steps: 200
+  decay_fraction: 0.10
+
+eval:
+  every_tokens: 1.0e8
+  tokens_per_language: 500000
+
+checkpoint:
+  every_tokens: 1.0e8
+  keep_every_tokens: 1.0e9
+
+log_every_steps: 20
+seed: 0
+compile: true

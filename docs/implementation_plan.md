@@ -433,6 +433,66 @@ Takeaways:
 - The real MLM numbers are lower than the toy benchmark in 5.3 (no head, no masking): the 200M is about
   5.5–7.5B tokens/day rather than 8.5B.
 
+### 5.7 MLM pretraining defaults (Stage 1, decided 2026-11-07)
+
+Defaults for the first runs. Items marked *(sweep)* are tuned before the long runs; *(ablate)* items are
+tested at 50M. Numbers are from ModernBERT, mmBERT and NeoBERT unless marked *(mine)*; the optimizer
+constants come from machine summaries of those papers and are unverified.
+
+| Setting | Default | Notes |
+|---|---|---|
+| Objective | MLM only, no next-sentence loss | |
+| Mask rate | **30%**, exactly K masked positions per batch | ModernBERT and mmBERT use 30%, NeoBERT 20% *(ablate)*. mmBERT lowers it to 15% then 5% in later phases *(ablate in decay)* |
+| Replacement | 100% `[MASK]` | NeoBERT dropped BERT's 80/10/10 split *(mine, not ablated)*. `[CLS]` and `[SEP]` are never masked |
+| Optimizer | StableAdamW: AdamW plus per-parameter update clipping, betas (0.90, 0.98), eps 1e-6 | replaces global gradient clipping, which is off |
+| Weight decay | 1e-5 on 2-D weights only; none on norms, embeddings, biases | ModernBERT 1e-5, mmBERT 8e-5 *(sweep if time)* |
+| Peak learning rate | **sweep first**: 2e-4, 4e-4, 8e-4, 1.6e-3 at 50M, short runs | ModernBERT and mmBERT used 8e-4 for the base size. Short sweeps favor larger rates and optimal rates do not transfer across training length (Completed(d)P), so the winner is a starting point |
+| Schedule | Warmup-stable-decay: linear warmup over 1% of tokens (at least 200 steps), constant, then 1 - sqrt decay to 0 over the last 10% | ModernBERT used 1 - sqrt decay *(decay share is mine, since our runs are far shorter)* |
+| Batch | 524,288 tokens per step (512 rows of 1024), via gradient accumulation | ModernBERT ramped to 4.7M tokens over 1.7T tokens; at 30B tokens, 0.5M gives about 57k steps. No batch-size warmup initially *(ablate)* |
+| Context | 1024 tokens; 8192 in the extension stage | see ablation 7 in 3.3 |
+| Precision | bf16 autocast, fp32 weights, `torch.compile` | |
+| Dropout | none | few epochs; ModernBERT used attention-output dropout 0.1 *(ablate if overfitting appears)* |
+| Language mix | quotas of the corpus plan (alpha = 0.5) as sampling probabilities | section 10.6 |
+| Rows | contiguous 1024-token windows of each language's token stream; documents packed, attention masked across `[CLS]` boundaries; a document cut by a window edge becomes two | no padding, nothing dropped |
+| Disk reads | runs of 16 consecutive rows per read | the HDD handles about 100–150 random reads/s; training needs about 250 rows/s at 50M |
+| Determinism | batch contents depend only on (seed, step); per-language row cursors are saved in checkpoints | exact resume |
+| Data pin | `snapshots/corpus_10B.json` until the 40B extension is done | loaders never read past the snapshot counts |
+| Validation | per-language MLM loss on 0.5M held-out tokens per language, fixed masks, every 100M training tokens; macro average over languages is the headline number | |
+| Checkpoints | `latest` every 100M tokens, a kept copy every 1B | |
+| Logging | JSONL file per run (loss, learning rate, tokens/s, update-clip statistic, memory) | no external services |
+
+### 5.8 Training pipeline status (2026-11-07)
+
+Code in `src/training/`: `data.py` (corpus reader, deterministic row sampling, prefetcher, GPU masking),
+`optim.py` (StableAdamW, parameter groups, warmup-stable-decay schedule), `mlm.py` (the trainer).
+Configs: `configs/train/mlm_50m.yaml` and `mlm_200m.yaml`. Run from the project root:
+
+```bash
+export EMBEDDING_RAW_DIR=/mnt/hdd-2tb/embedding-model/raw
+export EMBEDDING_TOKENIZED_DIR=/mnt/hdd-2tb/embedding-model/tokenized
+export EMBEDDING_RUNS_DIR=/mnt/hdd-2tb/embedding-model/runs      # checkpoints and logs (default: ./runs)
+python -m src.training.mlm --config configs/train/mlm_50m.yaml --run-name lr8e-4 \
+    --set optim.lr=8e-4 schedule.total_tokens=1e9
+```
+
+Checks run on a 100M-token smoke run of the 50M model (deleted afterwards):
+
+| Check | Result |
+|---|---|
+| Batch contents after resuming vs a continuous run (`iter_batches`) | identical |
+| Loss after killing at a checkpoint and resuming (step 120) | 8.3623 in both runs |
+| Language shares observed over 200 steps vs the mix | within 0.2 percentage points |
+| Masking: masked positions, special tokens | exactly 9,830 of 32,768 (30%); `[CLS]` and `[SEP]` never masked |
+| Data loader speed from the HDD (one thread, extension running at the same time) | 1.4M tokens/s, against about 0.25M needed |
+| End-to-end training speed, 50M, 1024 context | 229–239k tokens/s (the isolated benchmark: 244k), so loader and optimizer overhead is small |
+| Memory | 16.2 GB at 32k tokens per micro-batch |
+| Loss | 11.48 at start (ln of the 96k vocabulary is 11.47), 7.21 macro validation loss after 100M tokens (still warming up) |
+
+At about 230k tokens/s a 1B-token run takes about 72 minutes and the planned 30B-token run about 36 hours.
+The first learning-rate sweep (1B tokens per value, about 5 hours for four values) is the next GPU job.
+Notes: the optimizer step is a per-tensor Python loop, which costs little at this step size (about 2 s);
+checkpoints hold weights and optimizer (1.07 GB for the 50M) and a weights-only copy every 1B tokens.
+
 ---
 
 ## 6. Datasets
@@ -540,8 +600,8 @@ text bytes, so no language dominates the vocabulary.
 1. **M0 Environment and data audit:** confirm the 12 languages, per-language FineWeb-2 sizes, and licenses.
 2. **M1 Tokenizer and corpus:** candidates trained and evaluated (10.5), 96k chosen and set in the YAMLs,
    10B-token corpus built and verified (10.6).
-3. **M2 Model and MLM loop at 50M:** model code, correctness checks and the packing throughput check are
-   done (5.6). The MLM training loop, data loader and a short sanity run remain.
+3. **M2 Model and MLM loop at 50M:** done: model code, correctness checks, packing throughput (5.6), data
+   loader, trainer and a verified smoke run (5.8). Next: the learning-rate sweep.
 4. **M3 50M ablations** (section 3.3), then a full 50M pretraining run.
 5. **M4 Teacher benchmark and distillation pipeline at 50M**: measure teacher encoding speed and its quality
    at truncated dimensions (gating check), cache teacher embeddings, distillation loop, evaluation harness with all baselines.
