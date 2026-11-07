@@ -21,7 +21,7 @@ depending on them.
 | Sizes | 50M, 100M, 200M **non-embedding** parameters. 200M is the main target, 100M is optional and last |
 | Start with | **50M**: a cheap end-to-end pipeline test and the platform for ablations |
 | Languages | 12 languages (confirmed by user): en, zh, es, fr, de, pt, ru, ja, ar, hi, ko, it |
-| Tokenizer | Custom, shared by all sizes. Candidate sizes 48k / 64k / 96k / 128k, vocabulary size a multiple of 64 (see section 10) |
+| Tokenizer | Custom byte-level BPE, shared by all sizes. **96,000-token vocabulary** (decided 2026-11-07, see 10.5) |
 | Output embedding | 768 dimensions for 100M and 200M, 384 for 50M; Matryoshka (MRL) so it can be truncated (768/512/256/128, or 384/256/128/64 for the 50M) |
 | Context | Train short, extend to 8192. 32k only via inference-time RoPE scaling if wanted |
 | Architecture family | Dense bidirectional encoder, ModernBERT-style, trained from scratch |
@@ -110,13 +110,13 @@ All items below are from the ModernBERT paper unless marked.
 ### 3.2 Starting configurations
 
 Parameter counts are non-embedding, computed from my formula
-`layers × (4·hidden² + 3·hidden·intermediate)` *(mine)*. Vocabulary 64k–100k is extra.
+`layers × (4·hidden² + 3·hidden·intermediate)` *(mine)*. The 96k vocabulary is extra.
 
-| Model | Hidden | Layers | Heads | GeGLU intermediate | Non-emb params | Embedding table (64k vocab) |
+| Model | Hidden | Layers | Heads | GeGLU intermediate | Non-emb params | Embedding table (96k vocab) | Total params |
 |---|---|---|---|---|---|---|
-| 50M | 384 | 22 | 6 | 1536 | ~52M | ~25M |
-| 100M | 576 | 22 | 9 | 1728 | ~95M | ~37M |
-| 200M | 768 | 26 | 12 | 2304 | ~200M | ~49M |
+| 50M | 384 | 22 | 6 | 1536 | ~52M | ~37M | ~89M |
+| 100M | 576 | 22 | 9 | 1728 | ~95M | ~55M | ~151M |
+| 200M | 768 | 26 | 12 | 2304 | ~200M | ~74M | ~273M |
 
 For comparison, mmBERT-small is 384 hidden, 22 layers, 1152 intermediate (42M non-embedding), and
 ModernBERT-base is 768 hidden, 22 layers, 1152 intermediate (110M non-embedding). Ours use a larger
@@ -130,7 +130,8 @@ embedding probe.
 1. Depth vs width at fixed 52M: 22×384 vs 16×448 vs 28×336.
 2. Local/global ratio: every 3rd vs every 4th layer global. Window 128 vs 256.
 3. Mask rate: 20% vs 30%, and the 30 → 15 → 5 decay schedule vs constant.
-4. Vocabulary size: 48k vs 64k vs 96k (fertility on the 12 languages vs parameter cost).
+4. Vocabulary size: 96k is decided on compression and throughput grounds (10.5). Optional check: 64k vs 96k
+   on the 50M's downstream embedding quality, since compression is only a proxy.
 5. Pooling: CLS vs mean (after a short contrastive run).
 6. Norm type: RMSNorm vs LayerNorm (likely a tie, so keep whichever is faster under `torch.compile`).
 7. Pretrain at 8192 with global RoPE theta 160k from the start vs 1024 then extend. Packed short
@@ -186,9 +187,8 @@ Rules so the comparison is fair:
   (FineWeb-Edu or DCLM) plus Wikipedia. mmBERT's English share ranged from 10% to 34% by stage.
 - **Language sampling:** `q_i ∝ p_i^α`. Start at α = 0.5 (mGTE) and ablate lowering it to 0.3 in the decay
   phase (mmBERT-like).
-- **Tokenizer:** train on a balanced sample of the 12 languages, BPE or Unigram, 64k–96k vocabulary,
-  character coverage high enough for CJK. Measure fertility per language before committing. Special
-  tokens: CLS, SEP, MASK, PAD, plus a few unused slots.
+- **Tokenizer:** done (10.5): byte-level BPE, 96k vocabulary, NFKC, trained on a balanced sample of the
+  12 languages. Special tokens: PAD, UNK, CLS, SEP, MASK plus 11 unused slots (ids 0..15).
 - **Pair data:** see section 6.
 
 ### Stage 1: MLM pretraining
@@ -532,7 +532,8 @@ text bytes, so no language dominates the vocabulary.
 ## 8. Milestones
 
 1. **M0 Environment and data audit:** confirm the 12 languages, per-language FineWeb-2 sizes, and licenses.
-2. **M1 Tokenizer:** train candidates (48k/64k/96k), pick on fertility per language.
+2. **M1 Tokenizer:** candidates trained and evaluated (10.5), 96k chosen and set in the YAMLs. Remaining:
+   tokenize the corpus.
 3. **M2 Model and MLM loop at 50M:** model code, correctness checks and the packing throughput check are
    done (5.6). The MLM training loop, data loader and a short sanity run remain.
 4. **M3 50M ablations** (section 3.3), then a full 50M pretraining run.
@@ -563,7 +564,8 @@ text bytes, so no language dominates the vocabulary.
 - **Teacher truncation quality is unverified:** the Qwen3-Embedding card lists Matryoshka support (32–1024
   dimensions) but gives no quality numbers, and the paper does not describe Matryoshka training. The student
   targets at 384 and smaller depend on this, so it is a gating check in M4 (see Stage 4).
-- **Open decisions:** tokenizer size, Muon, and whether to test muP/CompleteP.
+- **Open decisions:** tokenizer vocabulary size (96k recommended, 10.5), Muon, and whether to test
+  muP/CompleteP.
 
 ---
 
@@ -649,6 +651,75 @@ Plan for the tokenizer step:
   comparing ("200M non-embedding, ~250M total").
 - **Runtime:** MMTEB reports up to two days on one A100 for moderate LLMs on the original English benchmark,
   and uses downsampling to cut cost. A small model's runtime is unknown. Time one on a few tasks first.
+
+### 10.5 Tokenizer results (2026-11-07)
+
+Code: `src/tokenizer/` (`train.py`, `evaluate.py`, `common.py`). Commands:
+
+```bash
+python -m src.data.download sample --mb 300      # 12 languages from FineWeb2-HQ-Plus / FineWeb-Edu
+python -m src.tokenizer.train --mb-per-lang 50   # ~2.5 min, ~16 GB RAM peak
+python -m src.tokenizer.evaluate                 # candidates vs public baselines
+```
+
+**Method.** Byte-level BPE (no unknown tokens), NFKC normalization, a Qwen-style pre-tokenizer with single
+digits, 16 special tokens at ids 0..15. Equal text bytes per language (so English is only 1/12 of the
+training text). One training run at 128k; the 48k, 64k and 96k candidates are exact prefixes of its merge
+list (BPE merges are learned in order). Evaluation uses a fixed 5% holdout of the sample, 3–8 MB of text per
+language, counted on raw text so normalization is not rewarded or penalized.
+
+**Characters per token** (higher is better; tokenizer trained on 12 languages only, so baselines that cover
+100+ languages are at a disadvantage here):
+
+| Tokenizer | en | zh | es | fr | de | pt | ru | ja | ar | hi | ko | it | macro |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ours 48k | 3.91 | 1.31 | 4.02 | 3.74 | 3.71 | 3.84 | 3.06 | 1.60 | 2.92 | 3.02 | 1.83 | 3.85 | 3.07 |
+| ours 64k | 4.06 | 1.36 | 4.18 | 3.89 | 3.89 | 4.00 | 3.22 | 1.68 | 3.08 | 3.19 | 1.92 | 4.01 | 3.21 |
+| **ours 96k** | 4.25 | 1.45 | 4.39 | 4.10 | 4.13 | 4.22 | 3.49 | 1.80 | 3.32 | 3.40 | 2.04 | 4.24 | **3.40** |
+| ours 128k | 4.37 | 1.51 | 4.52 | 4.24 | 4.30 | 4.35 | 3.67 | 1.88 | 3.48 | 3.54 | 2.13 | 4.39 | 3.53 |
+| XLM-R (250k) | 4.22 | 1.45 | 4.35 | 3.90 | 4.22 | 4.19 | 3.87 | 1.70 | 3.23 | 3.51 | 1.91 | 4.19 | 3.40 |
+| granite-97m-r2 (180k) | 4.80 | 1.25 | 4.52 | 4.25 | 4.26 | 4.35 | 3.64 | 1.32 | 3.12 | 3.19 | 1.70 | 3.90 | 3.36 |
+| EmbeddingGemma (262k) | 4.67 | 1.41 | 4.45 | 4.06 | 4.10 | 4.13 | 3.64 | 1.70 | 2.88 | 3.73 | 1.76 | 4.04 | 3.38 |
+| mmBERT / Gemma-2 (256k) | 4.68 | 1.40 | 4.56 | 4.15 | 4.33 | 4.21 | 3.63 | 1.73 | 2.83 | 2.64 | 1.50 | 4.13 | 3.32 |
+
+Other baselines (macro): EuroBERT 128k 2.91, Qwen3 151k 2.80, ModernBERT 50k 2.28. Bytes per token and
+tokens per word tables are in `data/tokenizer/report.md` (generated, not committed).
+
+**Findings.**
+1. **A bug caught by the per-language view.** The first pre-tokenizer copied Qwen's pattern, which treats only
+   letters as word characters. Devanagari vowel signs are combining marks, so Hindi words were split at every
+   mark: 2.0 characters/token even at 128k (Qwen3 shows the same flaw at 1.11). Adding `\p{M}` to the word
+   class raised Hindi to 3.40 at 96k and the macro average from 3.30 to 3.40. Any other script whose vowel
+   signs are marks (Thai, Bengali and so on) would need the same fix.
+2. **Tokenizer training data size does not matter here:** 25 MB and 50 MB per language gave the same scores
+   (3.12 / 3.29 / 3.41 vs 3.12 / 3.30 / 3.42 at 64k / 96k / 128k before the fix), so 100 MB is unnecessary.
+   (The trainer's memory is the limit: 150 MB per language needed over 31 GB.)
+3. **NFKC changes 2.8% of Chinese and 1.0% of Japanese characters** (mostly full-width punctuation folded to
+   ASCII) and 0.01–0.04% elsewhere. NFC changes nothing on this text. So the choice matters only for zh and
+   ja. Kept NFKC; it is lossy for symbols such as circled digits.
+4. **Published tokenizers can mislead a benchmark.** Granite's tokenizer ships with padding enabled and others
+   with truncation, which first made granite and EuroBERT look 20x worse. `evaluate.py` now disables both.
+5. **English is under-compressed (4.25 vs 4.7–4.8 for the big-vocabulary baselines)** because it is 1/12 of
+   the training text. If English-heavy retrieval matters most, up-weight it in tokenizer training.
+6. **Cost of a larger vocabulary, measured** (`model_throughput --vocab-sizes`, MLM tokens/s at 1024 context):
+
+| Vocab | 50M tok/s | 200M tok/s | 50M embedding / total params | 200M embedding / total params |
+|---|---|---|---|---|
+| 48k | 281k | 86k | 18.4M / 70M | 36.9M / 236M |
+| 64k | 269k | 85k | 24.6M / 76M | 49.2M / 249M |
+| 96k | 252k | 84k | 36.9M / 89M | 73.7M / 273M |
+| 128k | 234k | 81k | 49.2M / 101M | 98.3M / 298M |
+
+   Multiplying by characters per token gives text throughput. For the 50M it is flat from 48k to 96k
+   (about 855–864k characters/s) and 4% lower at 128k. For the 200M it rises about 4% from 64k to 96k and
+   1% more at 128k. In the later stages (distillation, contrastive) the MLM head is not used, so fewer
+   tokens per text is a pure saving: 96k needs about 5.6% fewer tokens than 64k.
+
+**Decision: 96k, shared by all three sizes (confirmed 2026-11-07).** It matches XLM-R's 250k vocabulary and beats granite's
+180k on these 12 languages, costs the 50M nothing in text throughput, and saves tokens in every later stage.
+128k adds only 3.8% more compression for +12M parameters and a 4% throughput loss at 50M. 64k was the
+fallback if total model size mattered most (the 50M would be 76M total instead of 89M). Applied to the
+model YAMLs (`vocab_size: 96000`) and the `ModelConfig` default.
 
 ### 10.4 Still open (deferred until needed)
 

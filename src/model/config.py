@@ -22,7 +22,7 @@ class ModelConfig:
     num_layers: int
     num_heads: int
     intermediate_size: int  # GeGLU intermediate width (the up/gate projection is 2x this)
-    vocab_size: int = 64000
+    vocab_size: int = 96000
     norm_eps: float = 1e-5
 
     # Attention layout: layer i is global when i % global_every == 0, otherwise sliding-window.

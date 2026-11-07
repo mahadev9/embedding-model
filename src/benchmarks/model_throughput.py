@@ -12,7 +12,7 @@ import time
 
 import torch
 
-from src.model import MLMModel, build_block_masks, load_model_config, select_masked
+from src.model import MLMModel, ModelConfig, build_block_masks, load_model_config, select_masked
 
 DEVICE = "cuda"
 
@@ -30,8 +30,17 @@ def make_packed_batch(
     return input_ids, doc_ids, labels
 
 
-def bench(size: str, seq_len: int, tokens_per_batch: int, mean_doc_len: int, iters: int) -> None:
+def bench(
+    size: str,
+    seq_len: int,
+    tokens_per_batch: int,
+    mean_doc_len: int,
+    iters: int,
+    vocab_size: int | None = None,
+) -> None:
     cfg = load_model_config(size)
+    if vocab_size is not None:
+        cfg = ModelConfig.from_dict({**cfg.to_dict(), "vocab_size": vocab_size})
     batch = tokens_per_batch // seq_len
     num_masked = int(0.31 * tokens_per_batch)  # fixed across steps -> static shapes
     model = MLMModel(cfg).to(DEVICE)
@@ -65,7 +74,8 @@ def bench(size: str, seq_len: int, tokens_per_batch: int, mean_doc_len: int, ite
 
     tok_per_s = tokens_per_batch / sec
     print(
-        f"{size} non-emb={cfg.non_embedding_params / 1e6:.0f}M T={seq_len:5d} "
+        f"{size} vocab={cfg.vocab_size // 1000}k non-emb={cfg.non_embedding_params / 1e6:.0f}M "
+        f"T={seq_len:5d} "
         f"docs~{mean_doc_len} {tok_per_s / 1e3:7.1f}k tok/s  "
         f"mem={torch.cuda.max_memory_allocated() / 2**30:.1f}GB  "
         f"-> {tok_per_s * 86400 / 1e9:.1f}B tok/day"
@@ -79,11 +89,13 @@ def main() -> None:
     parser.add_argument("--tokens-per-batch", type=int, default=32768)
     parser.add_argument("--mean-doc-len", type=int, default=400)
     parser.add_argument("--iters", type=int, default=5)
+    parser.add_argument("--vocab-sizes", nargs="+", type=int, default=[None], help="override vocab")
     args = parser.parse_args()
 
     for size in args.sizes:
         for seq_len in args.seq_lens:
-            bench(size, seq_len, args.tokens_per_batch, args.mean_doc_len, args.iters)
+            for vocab in args.vocab_sizes:
+                bench(size, seq_len, args.tokens_per_batch, args.mean_doc_len, args.iters, vocab)
             torch.cuda.empty_cache()
             torch.cuda.reset_peak_memory_stats()
 

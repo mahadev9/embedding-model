@@ -66,7 +66,14 @@ def source_folder(source: str, code: str) -> tuple[str, str]:
 
 
 def default_source(code: str) -> str:
-    return "fineweb-edu" if code == "en" else "fineweb2"
+    return "fineweb-edu" if code == "en" else "fineweb2-hq-plus"
+
+
+def resolve_source(code: str, requested: str | None) -> str:
+    """The requested source, except English never uses the (non-English) FineWeb-2 variants."""
+    if requested is None or (code == "en" and requested in ("fineweb2", "fineweb2-hq-plus")):
+        return default_source(code)
+    return requested
 
 
 SOURCES = ["fineweb2", "fineweb2-hq-plus", "fineweb-edu", "wikipedia"]
@@ -114,7 +121,7 @@ def cmd_sample(args: argparse.Namespace) -> None:
         if out_path.exists():
             print(f"{code}: exists, skipping ({out_path})")
             continue
-        repo, folder = source_folder(args.source or default_source(code), code)
+        repo, folder = source_folder(resolve_source(code, args.source), code)
         files = parquet_files(api, repo, folder)
         # Random shard order avoids always taking the oldest crawl snapshot.
         rng.shuffle(files)
@@ -133,7 +140,7 @@ def cmd_shards(args: argparse.Namespace) -> None:
     api = HfApi()
     rng = random.Random(args.seed)
     for code in args.langs:
-        source = args.source or default_source(code)
+        source = resolve_source(code, args.source)
         repo, folder = source_folder(source, code)
         files = parquet_files(api, repo, folder)
         chosen = files[: args.num_shards] if not args.random else rng.sample(files, args.num_shards)
@@ -156,7 +163,9 @@ def main() -> None:
 
     sample = sub.add_parser("sample", help="stream a small text sample per language")
     sample.add_argument("--langs", nargs="+", default=all_codes, choices=all_codes)
-    sample.add_argument("--source", choices=SOURCES, help="override per-language default source")
+    sample.add_argument(
+        "--source", choices=SOURCES, help="source for non-English languages (English: FineWeb-Edu)"
+    )
     sample.add_argument("--mb", type=int, default=300, help="text megabytes per language")
     sample.add_argument("--seed", type=int, default=0)
     sample.set_defaults(func=cmd_sample)

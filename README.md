@@ -26,6 +26,8 @@ python -m src.benchmarks.model_throughput --sizes 50m   # real-model MLM through
 
 python -m src.data.audit                        # source sizes and licenses (API only)
 python -m src.data.download sample --mb 300     # ~300 MB text per language, into data/
+python -m src.tokenizer.train --mb-per-lang 50  # BPE candidates (48k/64k/96k/128k), ~2.5 min
+python -m src.tokenizer.evaluate                # compare candidates with public tokenizers
 rm -rf data/                                    # remove all downloaded data
 
 # Optional: send bulk raw shards to another disk (caches follow it)
