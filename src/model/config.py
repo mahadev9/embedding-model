@@ -91,8 +91,11 @@ class ModelConfig:
 
     @property
     def non_embedding_params(self) -> int:
-        """Transformer body: all layers plus the embedding and final norms."""
-        return self.num_layers * self.params_per_layer + 2 * self.hidden_size
+        """Transformer body: all layers, plus the embedding and final norms.
+
+        The first block has no attention norm (the embedding norm precedes it), hence -1 vector.
+        """
+        return self.num_layers * self.params_per_layer + (2 - 1) * self.hidden_size
 
     @property
     def embedding_params(self) -> int:

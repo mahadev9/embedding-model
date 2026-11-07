@@ -4,7 +4,8 @@ Educational project: build three from-scratch multilingual text-embedding models
 aiming to be the best of their size class. This document records the research behind each design choice,
 the architecture, the training pipeline, and the techniques to use or ablate.
 
-**Status:** plan only, no model code yet. Written 2026-11-07.
+**Status (2026-11-07):** scaffold, model configs and model code are done and verified (see 5.6). Data,
+tokenizer and training loops are not started.
 
 **Confidence markers.** Claims tagged *(paper)* were read in the paper's own text. Claims tagged *(summary)*
 came from partial or machine-extracted summaries of a paper. *(blog)* is a secondary source.
@@ -264,12 +265,12 @@ Measured on the RTX 5090 (see [src/benchmarks/throughput.py](../src/benchmarks/t
 | cuDNN | 106 | 188 |
 | Memory-efficient | 72 | 84 |
 
-- Use the built-in SDPA flash backend for global layers, with no flash-attn build needed.
+- The built-in SDPA flash backend works on sm_120 with no flash-attn build, and is the fastest dense kernel here.
 - FlexAttention with a sliding window compiled and ran (about 1.5 ms at 8192 tokens, 32k tokens per batch).
   Use it for the local layers.
-- **Not yet tested:** FlexAttention with a document mask for packed sequences. This is the likely route for
-  padding-free packing on sm_120, because SDPA has no variable-length interface *(mine)*. Benchmark it
-  before committing, and fall back to length-bucketed padded batches if it is slow.
+- **Verified:** FlexAttention with a document mask handles packed sequences on sm_120. Building both block
+  masks (global and local) costs about 2 ms per batch. The model uses FlexAttention for all layers, so the
+  SDPA flash numbers above are a reference, not what the model runs. See 5.6.
 
 ### 5.3 Measured throughput (training, no MLM head, bf16, `torch.compile`)
 
@@ -281,11 +282,11 @@ Measured on the RTX 5090 (see [src/benchmarks/throughput.py](../src/benchmarks/t
 At 8192 tokens, throughput is about half. A 200M run at 64k tokens per micro-batch runs out of memory
 without checkpointing, and 16k tokens uses about 15 GB.
 
-### 5.4 Rough compute plan *(mine, from the benchmark, ignoring data-loading and MLM-head overhead)*
+### 5.4 Rough compute plan *(mine, from the real-model benchmark in 5.6, ignoring data-loading overhead)*
 
 | Stage | 50M | 200M |
 |---|---|---|
-| MLM pretraining, 1024 context | ~30B tokens, about 1 day | ~25B tokens, about 3 days |
+| MLM pretraining, 1024 context | ~30B tokens, about 1.4 days | ~25B tokens, about 3.5–4.5 days |
 | Context extension + decay | ~5B tokens, a few hours | ~5B tokens, about 1 day |
 | Contrastive + fine-tuning | 1–2 days | 3–5 days |
 | Distillation + merging | hours | 1–2 days |
@@ -297,16 +298,58 @@ two to three weeks for the 200M.
 
 ```
 src/
-  benchmarks/      throughput.py (exists)
+  benchmarks/      throughput.py, model_throughput.py (exist)
   data/            download, filter, language sampling, pair mining, synthetic generation
   tokenizer/       train + fertility report
-  model/           blocks, encoder, configs (50M/100M/200M), pooling, MRL head
+  model/           config, rope, attention, encoder, heads (exist: see 5.6)
   training/        mlm.py, contrastive.py (GradCache), distill.py, optimizers, schedules, merge.py
   eval/            MMTEB subset, MIRACL, MLDR, throughput, contamination checks
   rerank/          cross-encoder + training
-configs/           one YAML per stage and size
+configs/           one YAML per stage and size (configs/model/ exists)
 docs/              this file
 ```
+
+### 5.6 Implementation status and measured results
+
+**Built in `src/model/`:** `config.py` (validated `ModelConfig`, loaded from `configs/model/*.yaml`, analytic
+parameter counts), `rope.py`, `attention.py` (FlexAttention with a document mask and a sliding window),
+`encoder.py` (pre-norm blocks, GeGLU, no biases, extra norm after the embeddings, first block without an
+attention norm), and `heads.py` (`MLMModel` with a tied decoder, `EmbeddingModel` with CLS or mean pooling,
+projection, L2 normalization and Matryoshka truncation).
+
+**Interface:** every forward pass takes `input_ids` and `doc_ids` (document index per token, `-1` for
+padding). Packed pretraining rows and padded one-text-per-row embedding batches use the same path. Sequence
+length should be a multiple of 128 (FlexAttention block size).
+
+**Correctness checks** (ad hoc script, not committed as tests):
+
+| Check | Result |
+|---|---|
+| Attention vs dense reference mask (global and local layers, fp32) | max difference ~1e-7 |
+| Two documents packed in one row vs run separately (full model, fp32) | max difference ~1e-6 |
+| RoPE positions restart at document boundaries | confirmed |
+| MLM loss at initialization | 11.12 (ln 64000 = 11.07) |
+| Embedding output and Matryoshka truncation (768 and 128 dims) | unit norm at both |
+| Parameter count vs `ModelConfig` | exact match for 50M, 100M, 200M |
+
+**MLM training throughput, real model** (bf16, `torch.compile`, packed documents, 30% masked,
+`python -m src.benchmarks.model_throughput`):
+
+| Model | Seq len | Packed docs | Tokens/s | Tokens/day | Peak memory |
+|---|---|---|---|---|---|
+| 50M | 1024 | ~400 tokens | 255k | ~22B | 18.3 GB at 32k tokens/batch |
+| 50M | 8192 | ~400 tokens | 235k | ~20B | 18.3 GB at 32k tokens/batch |
+| 200M | 1024 | ~400 tokens | 84k | ~7.3B | 18.7 GB at 16k tokens/batch |
+| 200M | 8192 | ~400 tokens | 81k | ~7.0B | 18.7 GB at 16k tokens/batch |
+| 200M | 8192 | one 8192-token doc | 64k | ~5.6B | 18.7 GB at 16k tokens/batch |
+
+Takeaways:
+- Packing short documents into 8192-token rows costs almost nothing extra per token, because the mask skips
+  cross-document blocks. Pretraining at 8192 on packed short text is nearly as cheap as at 1024.
+- Long single documents are the expensive case (the 200M drops to 64k tokens/s). The extension stage should
+  budget for that, since long documents are what it trains on.
+- The real MLM numbers are lower than the toy benchmark in 5.3 (no head, no masking): the 200M is about
+  5.6–7B tokens/day rather than 8.5B.
 
 ---
 
@@ -346,7 +389,8 @@ Contamination: hold out evaluation sets before building any training mix, and de
 
 1. **M0 Environment and data audit:** confirm the 12 languages, per-language FineWeb-2 sizes, and licenses.
 2. **M1 Tokenizer:** train candidates (48k/64k/96k), pick on fertility per language.
-3. **M2 Model and MLM loop at 50M:** unit tests, short sanity run, throughput check with packing.
+3. **M2 Model and MLM loop at 50M:** model code, correctness checks and the packing throughput check are
+   done (5.6). The MLM training loop, data loader and a short sanity run remain.
 4. **M3 50M ablations** (section 3.3), then a full 50M pretraining run.
 5. **M4 Contrastive and fine-tuning pipeline at 50M**, with GradCache, hard-negative mining, MRL, evaluation.
 6. **M5 Distillation and merging ablations at 50M.**
@@ -362,7 +406,7 @@ Contamination: hold out evaluation sets before building any training mix, and de
 - **From-scratch multilingual quality:** with no pretrained backbone, expect to trail Jina-v5, EmbeddingGemma
   and Harrier, which start from large pretrained models.
 - **Pair-data quality** is likely to be the dominant factor, given finding 1 and the NeoBERT ablations.
-- **Packing on sm_120:** the FlexAttention document-mask route is unverified.
+- **Packing on sm_120:** resolved. FlexAttention document masking works and is fast (5.6).
 - **Licenses** for several datasets are unconfirmed (MIRACL, Mr. TyDi, mMARCO, NLLB, FineWeb-Edu/DCLM).
 - **Unverified details:** several numbers from mmBERT, mGTE and NeoBERT came from machine summaries of
   truncated pages. Where a number drives a decision, read the paper section directly.
