@@ -220,4 +220,4 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Downloaded and derived data (delete with: rm -rf data/)
-data/
+/data/
