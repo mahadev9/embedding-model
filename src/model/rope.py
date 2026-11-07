@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+from torch import nn
 
 
 def positions_from_doc_ids(doc_ids: torch.Tensor) -> torch.Tensor:
@@ -18,23 +19,17 @@ def positions_from_doc_ids(doc_ids: torch.Tensor) -> torch.Tensor:
     return idx - start_idx
 
 
-class RotaryEmbedding:
-    """Computes cos/sin tables on the fly for a given theta; holds no parameters."""
+class RotaryEmbedding(nn.Module):
+    """Produces cos/sin tables for one theta. Holds only a non-persistent frequency buffer."""
 
     def __init__(self, head_dim: int, theta: float) -> None:
-        self.head_dim = head_dim
-        self.theta = theta
-        self._inv_freq: dict[torch.device, torch.Tensor] = {}
+        super().__init__()
+        exponent = torch.arange(0, head_dim, 2, dtype=torch.float32)
+        self.register_buffer("inv_freq", 1.0 / (theta ** (exponent / head_dim)), persistent=False)
 
-    def inv_freq(self, device: torch.device) -> torch.Tensor:
-        if device not in self._inv_freq:
-            exponent = torch.arange(0, self.head_dim, 2, device=device, dtype=torch.float32)
-            self._inv_freq[device] = 1.0 / (self.theta ** (exponent / self.head_dim))
-        return self._inv_freq[device]
-
-    def cos_sin(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """position_ids (B, T) -> cos, sin of shape (B, 1, T, head_dim) in float32."""
-        freqs = position_ids.to(torch.float32)[..., None] * self.inv_freq(position_ids.device)
+        freqs = position_ids.to(torch.float32)[..., None] * self.inv_freq
         emb = torch.cat((freqs, freqs), dim=-1)
         return emb.cos()[:, None], emb.sin()[:, None]
 

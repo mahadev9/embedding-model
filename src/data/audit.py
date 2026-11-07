@@ -86,8 +86,7 @@ def main() -> None:
 
     print("\n== FineWeb-Edu (English)")
     root = [
-        f.path
-        for f in api.list_repo_tree(FINEWEB_EDU_REPO, repo_type="dataset", recursive=False)
+        f.path for f in api.list_repo_tree(FINEWEB_EDU_REPO, repo_type="dataset", recursive=False)
     ]
     print("top level:", root)
     sample_dirs = [p for p in root if p.startswith("sample")]

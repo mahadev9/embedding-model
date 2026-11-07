@@ -11,7 +11,7 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from .attention import Attention, build_block_masks
 from .config import ModelConfig
-from .rope import positions_from_doc_ids
+from .rope import RotaryEmbedding, positions_from_doc_ids
 
 
 class GeGLU(nn.Module):
@@ -40,10 +40,10 @@ class Block(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        position_ids: torch.Tensor,
+        rope: dict[str, tuple[torch.Tensor, torch.Tensor]],
         block_masks: dict[str, BlockMask],
     ) -> torch.Tensor:
-        x = x + self.attn(self.attn_norm(x), position_ids, block_masks)
+        x = x + self.attn(self.attn_norm(x), rope, block_masks)
         return x + self.mlp(self.mlp_norm(x))
 
 
@@ -55,6 +55,13 @@ class Encoder(nn.Module):
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
         self.embed_norm = nn.RMSNorm(cfg.hidden_size, eps=cfg.norm_eps)
+        # One set of cos/sin tables per layer type, computed once per forward and shared by layers.
+        self.rope = nn.ModuleDict(
+            {
+                "local": RotaryEmbedding(cfg.head_dim, cfg.rope_theta_local),
+                "global": RotaryEmbedding(cfg.head_dim, cfg.rope_theta_global),
+            }
+        )
         self.blocks = nn.ModuleList(Block(cfg, i) for i in range(cfg.num_layers))
         self.final_norm = nn.RMSNorm(cfg.hidden_size, eps=cfg.norm_eps)
         self.reset_parameters()
@@ -83,13 +90,15 @@ class Encoder(nn.Module):
         input_ids: (B, T) token ids; T should be a multiple of 128 (the FlexAttention block size).
         doc_ids: (B, T) document index per token (-1 for padding), defining who attends to whom.
         position_ids: (B, T) RoPE positions; defaults to positions restarting at each document.
-        block_masks: pass precomputed masks to reuse them (e.g. across gradient-cache chunks).
+        block_masks: precomputed masks from build_block_masks. Build them OUTSIDE any
+            torch.compile region (mask construction graph-breaks the compiler) and pass them in.
         """
         if position_ids is None:
             position_ids = positions_from_doc_ids(doc_ids)
         if block_masks is None:
             block_masks = build_block_masks(doc_ids, self.cfg.local_window)
+        rope = {name: module(position_ids) for name, module in self.rope.items()}
         x = self.embed_norm(self.embed(input_ids))
         for block in self.blocks:
-            x = block(x, position_ids, block_masks)
+            x = block(x, rope, block_masks)
         return self.final_norm(x)

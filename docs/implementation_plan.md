@@ -22,11 +22,13 @@ depending on them.
 | Start with | **50M**: a cheap end-to-end pipeline test and the platform for ablations |
 | Languages | 12 languages (confirmed by user): en, zh, es, fr, de, pt, ru, ja, ar, hi, ko, it |
 | Tokenizer | Custom, shared by all sizes. Candidate sizes 48k / 64k / 96k / 128k, vocabulary size a multiple of 64 (see section 10) |
-| Output embedding | 768 dimensions, Matryoshka (MRL) so it can be truncated to 512/256/128 |
+| Output embedding | 768 dimensions for 100M and 200M, 384 for 50M; Matryoshka (MRL) so it can be truncated (768/512/256/128, or 384/256/128/64 for the 50M) |
 | Context | Train short, extend to 8192. 32k only via inference-time RoPE scaling if wanted |
 | Architecture family | Dense bidirectional encoder, ModernBERT-style, trained from scratch |
 | Reranker | Phase 2, after the embedder works |
-| Teacher distillation | An ablation at 50M first (with vs without) |
+| Teacher distillation | **Main recipe** (see section 11): distill from cached teacher embeddings, then contrastive fine-tune. Contrastive-only is kept as the baseline run |
+| Parallel (translation) pairs | Included, filtered, weighted toward pairs among the 12 languages (see section 11) |
+| 50M output dimension | **384** (equals its hidden size, Matryoshka 384/256/128/64). Decided 2026-11-07, see 11.3 |
 
 ---
 
@@ -94,7 +96,7 @@ All items below are from the ModernBERT paper unless marked.
 
 | Component | Choice | Notes |
 |---|---|---|
-| Attention layout | Global attention every 3rd layer, sliding-window (128 tokens) in the others | Matched global-only quality in ablations at 100B tokens, with large speedups |
+| Attention layout | Global attention every 3rd layer, sliding-window (128 tokens) in the others. **The last layer is always global** so the pooled CLS token sees the whole text (the 200M, 26 layers, would otherwise end on a local layer) | Matched global-only quality in ablations at 100B tokens, with large speedups |
 | Positional encoding | RoPE. Theta 10,000 for local layers. Global layers 10,000 during pretraining, raised to **160,000** at context extension | Both ModernBERT and mmBERT do this |
 | Normalization | Pre-norm. Extra norm after the embedding layer, no norm on the first layer's attention input | ModernBERT used LayerNorm. LayerNorm vs RMSNorm made little difference in its ablations. We use RMSNorm (PyTorch has it natively now) *(mine)* |
 | Activation | GeGLU | GeGLU and SwiGLU were about equal in ablations *(summary)* |
@@ -103,7 +105,7 @@ All items below are from the ModernBERT paper unless marked.
 | Dimensions | Multiples of 64, head dim 64, vocabulary a multiple of 64 | Tensor-core efficiency |
 | Padding | Padding-free: pack documents and mask across them | See 5.2 for the kernel choice |
 | Pooling | Test **CLS vs mean** at 50M | mGTE and BGE-M3 use CLS |
-| Output head | Linear projection to 768 where hidden size differs, then L2 normalize | MRL applied to this 768-dim output |
+| Output head | Linear projection to `output_dim` where it differs from the hidden size (100M only: 576 to 768), then L2 normalize. The 50M and 200M need no projection | MRL applied to the output vector |
 
 ### 3.2 Starting configurations
 
@@ -131,6 +133,11 @@ embedding probe.
 4. Vocabulary size: 48k vs 64k vs 96k (fertility on the 12 languages vs parameter cost).
 5. Pooling: CLS vs mean (after a short contrastive run).
 6. Norm type: RMSNorm vs LayerNorm (likely a tie, so keep whichever is faster under `torch.compile`).
+7. Pretrain at 8192 with global RoPE theta 160k from the start vs 1024 then extend. Packed short
+   documents cost only 4–8% more per token at 8192 (5.6), but real documents are longer than the benchmark's
+   ~400 tokens, so measure on real data.
+8. Token budget slope: the same 50M model at 30B vs about 100B tokens, to see how much a longer run buys
+   before committing a week of the 5090 to either size.
 
 ---
 
@@ -140,9 +147,10 @@ embedding probe.
 Stage 0  Data + tokenizer
 Stage 1  MLM pretraining (warmup-stable) ──► Stage 2 Context extension to 8192 (RoPE 160k)
          ──► Stage 3 Decay phase (low mask rate, language mix annealed) ──► merge checkpoints
-Stage 4  Contrastive pretraining (large batch, weak pairs, in-batch negatives)
-Stage 5  Supervised fine-tuning (hard negatives, MRL, instruction prefixes)
-Stage 6  Distillation from a teacher (ablation)           ──► merge / soup
+Stage 4  Distillation pretraining from cached teacher embeddings (main recipe)
+Stage 5  Contrastive fine-tuning (hard negatives, MRL, instruction prefixes)
+Stage 6  Contrastive-only baseline (large batch, weak pairs, in-batch negatives)  [educational baseline]
+         ──► merge / soup
 Stage 7  Long-context embedding fine-tune (short stage)
 Phase 2  Cross-encoder reranker
 ```
@@ -187,23 +195,36 @@ Phase 2  Cross-encoder reranker
   multilingual-heavy) and merge them (mmBERT: TIES for base, exponentially weighted checkpoint average for
   small). The model-merging step is cheap, so try it.
 
-### Stage 4: Contrastive pretraining
+### Stage 4: Distillation pretraining (main recipe)
 
-- Loss: InfoNCE with in-batch negatives over (query, positive) pairs, symmetric if the data allows.
-- Temperature: sweep 0.01–0.05. Evidence: mGTE 0.01 for pretraining, Salesforce 0.02, other guides 0.05.
-- Batch size: as large as possible. mGTE used 16,384. Use **GradCache** (exact large-batch gradients, roughly
-  20% overhead *(blog/paper)*). Sweep 1k, 4k, 16k at 50M to see where the gains stop.
-- Each batch drawn from a single data source (mGTE) to make in-batch negatives harder and cleaner.
-- Max lengths: queries 128–256, documents 512 for this stage.
-- Data: cleaned weak pairs (title–body, adjacent passages, heading–section, QA, duplicates). Quality over
-  volume. Start with 50–100M pairs and measure before collecting more.
+Why: the strongest small models are distilled, not trained contrastively from scratch. jina-embeddings-v5-text
+(EuroBERT-210M student, Qwen3-Embedding-4B teacher) found distillation beat plain contrastive training and the
+two combined did best. LEAF (23M English student, teacher mxbai-embed-large-v1) trains only to match the
+teacher's embeddings with an L2 loss, needs no hard negatives, and works with small batches. Both start from
+pretrained backbones, so whether this holds for a from-scratch student is untested here. Hence the 50M
+comparison (distill vs contrastive-only vs both) is the project's central experiment.
 
-### Stage 5: Supervised fine-tuning
+- **Teacher:** Qwen3-Embedding-0.6B first (Apache 2.0, multilingual, reported to support Matryoshka-truncated
+  output; language coverage of our 12 and truncation quality are unverified). Try 4B if the 0.6B teacher is
+  the bottleneck. **Measure its encoding speed on the 5090 before sizing the corpus.**
+- **Corpus to embed:** FineWeb2-HQ-Plus passages of mixed lengths, mined pairs, synthetic queries, and
+  filtered parallel sentences. Start with 20–50M texts. Cached embeddings cost about 1.5 KB per text
+  (768 dims, fp16), so 20–50M texts is 30–75 GB, which fits on the HDD.
+- **Loss:** L2 or cosine between student and cached teacher embeddings (LEAF). Add a KL loss on the
+  in-batch similarity matrices *(mine)*, and optionally EmbeddingGemma's spread-out regularizer. If the
+  student's output size differs from the teacher's, use a projection head that exists only in training.
+- **Queries vs documents:** embed queries with the teacher's query instruction and documents without, and
+  give the student matching prefixes.
+- **Batch size** can be small, so GradCache is optional here, unlike stage 6.
+- The teacher's quality caps the student's. Keep checking the student against the teacher on held-out text.
+
+### Stage 5: Contrastive fine-tuning (after distillation)
 
 - Positives plus **mined hard negatives** (mGTE: 1 positive + 8 hard negatives; Salesforce: 7). Mine with the
   stage-4 model, using a rank window (for example, ranks 10–100) and filtering likely false negatives
   (drop negatives scoring above 95% of the positive's score, or use a teacher reranker to filter).
-- Add the MRL loss over dimensions 768/512/256/128 (EmbeddingGemma's setup).
+- Add the MRL loss over the model's Matryoshka sizes (768/512/256/128, or 384/256/128/64 for the 50M;
+  EmbeddingGemma's setup).
 - Temperature 0.02–0.05.
 - Task and language diversity: mix retrieval, STS, classification-style pairs, clustering-style pairs, and
   multilingual synthetic retrieval. Salesforce found task diversity mattered most.
@@ -213,16 +234,16 @@ Phase 2  Cross-encoder reranker
 - Avoid MTEB **training** splits unless you plan to report scores as "trained on MTEB". The Salesforce and
   NeoBERT recipes both use them. Keep your reported evaluation clean.
 
-### Stage 6: Distillation (ablation)
+### Stage 6: Contrastive-only baseline (and optional mix-in)
 
-- Teacher: an open embedding model run locally (Qwen3-Embedding 0.6B/4B). Precompute and cache teacher
-  scores or embeddings over the training set so the 5090 isn't running two models at once.
-- Dimension-agnostic option *(mine)*: distill the **similarity distribution**, meaning a KL divergence
-  between teacher and student scores over each query's positive, hard negatives and in-batch candidates.
-  No projection layer is needed.
-- EmbeddingGemma's version matches embeddings directly. Add its **spread-out regularizer** (a global-orthogonal
-  second-moment term on in-batch embeddings) at equal weight.
-- Run at 50M: contrastive only vs distill only vs both. This is the educational result of the project.
+- Loss: InfoNCE with in-batch negatives over (query, positive) pairs, symmetric if the data allows.
+- Temperature: sweep 0.01–0.05. Evidence: mGTE 0.01 for pretraining, Salesforce 0.02, other guides 0.05.
+- Batch size: as large as possible. mGTE used 16,384. Use **GradCache** (exact large-batch gradients, roughly
+  20% overhead *(blog/paper)*). Sweep 1k, 4k, 16k at 50M to see where the gains stop.
+- Each batch drawn from a single data source (mGTE) to make in-batch negatives harder and cleaner.
+- Max lengths: queries 128–256, documents 512 for this stage.
+- Data: cleaned weak pairs (title–body, adjacent passages, heading–section, QA, duplicates). Quality over
+  volume. Start with 50–100M pairs and measure before collecting more.
 
 ### Stage 7: Long-context fine-tune
 
@@ -318,8 +339,17 @@ attention norm), and `heads.py` (`MLMModel` with a tied decoder, `EmbeddingModel
 projection, L2 normalization and Matryoshka truncation).
 
 **Interface:** every forward pass takes `input_ids` and `doc_ids` (document index per token, `-1` for
-padding). Packed pretraining rows and padded one-text-per-row embedding batches use the same path. Sequence
-length should be a multiple of 128 (FlexAttention block size).
+padding). Packed pretraining rows and padded one-text-per-row embedding batches use the same path. Any
+sequence length works (checked at 100 and 300 tokens against the padded-to-128 result); multiples of 128 just
+avoid partial FlexAttention blocks.
+- **Build block masks outside `torch.compile`** (`build_block_masks`) and pass them in. Building them inside the
+  compiled region caused graph breaks.
+- **`MLMModel`** takes a fixed number of masked positions per batch (`mlm_positions`, `mlm_labels`, with `-100`
+  for unused slots; `select_masked` builds them from a label tensor). Boolean-mask indexing produced a
+  different shape each step, which broke the compiled graph and recompiled.
+- **`EmbeddingModel.encode_packed`** pools many texts per row without padding between them (CLS = first
+  token of each text, or a per-text mean), so short queries no longer pay for padding to 128 tokens.
+- RoPE cos/sin tables are computed once per forward per theta and shared by all layers.
 
 **Correctness checks** (ad hoc script, not committed as tests):
 
@@ -328,8 +358,11 @@ length should be a multiple of 128 (FlexAttention block size).
 | Attention vs dense reference mask (global and local layers, fp32) | max difference ~1e-7 |
 | Two documents packed in one row vs run separately (full model, fp32) | max difference ~1e-6 |
 | RoPE positions restart at document boundaries | confirmed |
-| MLM loss at initialization | 11.12 (ln 64000 = 11.07) |
+| MLM loss at initialization | 11.15 (ln 64000 = 11.07) |
 | Embedding output and Matryoshka truncation (768 and 128 dims) | unit norm at both |
+| `encode_packed` vs padded `forward`, CLS and mean pooling | max difference ~3e-8 |
+| Last layer is global on 50M, 100M and 200M | confirmed |
+| Graph breaks in the compiled MLM step (varying masked counts) | none |
 | Parameter count vs `ModelConfig` | exact match for 50M, 100M, 200M |
 
 **MLM training throughput, real model** (bf16, `torch.compile`, packed documents, 30% masked,
@@ -337,19 +370,23 @@ length should be a multiple of 128 (FlexAttention block size).
 
 | Model | Seq len | Packed docs | Tokens/s | Tokens/day | Peak memory |
 |---|---|---|---|---|---|
-| 50M | 1024 | ~400 tokens | 255k | ~22B | 18.3 GB at 32k tokens/batch |
-| 50M | 8192 | ~400 tokens | 235k | ~20B | 18.3 GB at 32k tokens/batch |
-| 200M | 1024 | ~400 tokens | 84k | ~7.3B | 18.7 GB at 16k tokens/batch |
-| 200M | 8192 | ~400 tokens | 81k | ~7.0B | 18.7 GB at 16k tokens/batch |
-| 200M | 8192 | one 8192-token doc | 64k | ~5.6B | 18.7 GB at 16k tokens/batch |
+| 50M | 1024 | ~400 tokens | 257k | ~22B | 14.8 GB at 32k tokens/batch |
+| 50M | 8192 | ~400 tokens | 248k | ~21B | 14.8 GB at 32k tokens/batch |
+| 200M | 1024 | ~400 tokens | 87k | ~7.5B | 16.9 GB at 16k tokens/batch |
+| 200M | 8192 | ~400 tokens | 83k | ~7.2B | 16.9 GB at 16k tokens/batch |
+| 200M | 8192 | one 8192-token doc | 64k | ~5.5B | 16.9 GB at 16k tokens/batch |
+
+Each step builds a fresh batch (new documents and masks) and includes mask building, as in real training.
+The first benchmark (previous revision) reused the same label count every step, which hid a recompile and
+two graph-break problems; fixing them also cut memory by about 3 GB and raised throughput slightly.
 
 Takeaways:
-- Packing short documents into 8192-token rows costs almost nothing extra per token, because the mask skips
+- Packing short documents into 8192-token rows costs only 4–8% extra per token, because the mask skips
   cross-document blocks. Pretraining at 8192 on packed short text is nearly as cheap as at 1024.
 - Long single documents are the expensive case (the 200M drops to 64k tokens/s). The extension stage should
   budget for that, since long documents are what it trains on.
 - The real MLM numbers are lower than the toy benchmark in 5.3 (no head, no masking): the 200M is about
-  5.6–7B tokens/day rather than 8.5B.
+  5.5–7.5B tokens/day rather than 8.5B.
 
 ---
 
@@ -440,10 +477,13 @@ text bytes, so no language dominates the vocabulary.
 1. **During MLM:** validation MLM loss per language, plus a tiny probe (frozen-embedding STS or retrieval on
    a small multilingual set) every N tokens.
 2. **Embeddings:** an MMTEB subset (retrieval, STS, classification, clustering, bitext mining) in the 12
-   languages, MIRACL for retrieval, MLDR for long documents. Compare against same-size baselines
-   (multilingual-e5 small/base, mmBERT-small fine-tuned) rather than the large models.
+   languages, MIRACL for retrieval, MLDR for long documents. Compare against same-size baselines, all run
+   on the same 12-language subset: multilingual-e5 small/base, mmBERT-small fine-tuned, EmbeddingGemma-300m,
+   **granite-embedding-97m-multilingual-r2** (Apache 2.0), **jina-embeddings-v5-text-nano** (CC BY-NC, so for
+   comparison only), and for the English subset **LEAF**. Report scores by task type (retrieval, STS,
+   classification, clustering, bitext mining), not only the overall mean.
 3. **Efficiency:** tokens per second and memory at 512 and 8192 tokens.
-4. **MRL:** quality at 768/512/256/128 dimensions.
+4. **MRL:** quality at each Matryoshka size.
 5. **Reference points** (third-party reports): mmBERT-small, fine-tuned on MS MARCO only, scored 50.7 on
    multilingual MTEB v2 and mmBERT-base 54.1. The 305M Salesforce retrofit scored 60.56 on MMTEB retrieval.
    Those are the kinds of numbers to compare against.
@@ -457,8 +497,10 @@ text bytes, so no language dominates the vocabulary.
 3. **M2 Model and MLM loop at 50M:** model code, correctness checks and the packing throughput check are
    done (5.6). The MLM training loop, data loader and a short sanity run remain.
 4. **M3 50M ablations** (section 3.3), then a full 50M pretraining run.
-5. **M4 Contrastive and fine-tuning pipeline at 50M**, with GradCache, hard-negative mining, MRL, evaluation.
-6. **M5 Distillation and merging ablations at 50M.**
+5. **M4 Teacher benchmark and distillation pipeline at 50M**: measure teacher encoding speed, cache
+   teacher embeddings, distillation loop, evaluation harness with all baselines.
+6. **M5 Contrastive pipeline and ablations at 50M**: hard-negative mining, MRL, GradCache baseline run,
+   distill vs contrastive vs both, merging.
 7. **M6 Scale to 200M** with the best recipe. 100M if time allows.
 8. **M7 Reranker.**
 
@@ -472,10 +514,14 @@ text bytes, so no language dominates the vocabulary.
   and Harrier, which start from large pretrained models.
 - **Pair-data quality** is likely to be the dominant factor, given finding 1 and the NeoBERT ablations.
 - **Packing on sm_120:** resolved. FlexAttention document masking works and is fast (5.6).
-- **Licenses** for several datasets are unconfirmed (MIRACL, Mr. TyDi, mMARCO, NLLB, FineWeb-Edu/DCLM).
+- **Licenses** for several datasets are unconfirmed (MIRACL, Mr. TyDi, mMARCO, NLLB, FineWeb-Edu/DCLM). The Qwen3-Embedding teacher license (Apache 2.0) was
+  reported in search results, not read from the model card.
 - **Unverified details:** several numbers from mmBERT, mGTE and NeoBERT came from machine summaries of
   truncated pages. Where a number drives a decision, read the paper section directly.
-- **Open decisions:** tokenizer size and whether to try Muon.
+- **Teacher cost is unmeasured:** how fast Qwen3-Embedding-0.6B encodes on the 5090 sets the corpus size.
+- **Realistic goal:** the leading small models start from trillion-token pretrained backbones. Aim for best
+  from-scratch model in each class, or best on specific task types or languages, not best overall.
+- **Open decisions:** tokenizer size, 50M output dimension, Muon, and whether to test muP/CompleteP.
 
 ---
 
@@ -570,7 +616,48 @@ synthetic-data LLM choice and license.
 
 ---
 
-## 11. Sources
+## 11. External plan review (2026-11-07): assessment and changes
+
+A reviewer read this plan and the code. I checked each claim: code claims by testing them, model and recipe
+claims against sources. Status: **confirmed** (verified and acted on), **accepted** (reasonable, adopted as a
+test or plan change), **open** (needs your decision).
+
+### 11.1 Code findings
+
+| # | Finding | Status | What I did |
+|---|---|---|---|
+| 1 | 200M (26 layers) ends on a local layer, so the final CLS token sees only +-64 tokens | **confirmed** (layer 25 was local; 50M and 100M end global) | Last layer is now always global, for any depth. 200M has 10 global layers |
+| 2 | `EmbeddingModel` pads short texts to 128-token blocks | **confirmed** | Added `encode_packed` (CLS and mean pooling), equal to the padded path within 3e-8 |
+| 3 | Padded inputs not rounded to 128 | **partly**: lengths 100 and 300 work and match padded-to-128 within 1e-6, so it is not a correctness bug | No code change. Packing removes the efficiency concern. Docstring corrected |
+| 4 | `hidden[masked]` has a data-dependent shape and recompiles | **confirmed**, and worse: block-mask construction inside the compiled region also graph-broke | Fixed-count masked positions (`select_masked`), masks built outside compile. My earlier benchmark reused one label count and hid this |
+| 5 | 50M projects 384 to 768, so rank is at most 384 | **accepted** | 50M now outputs 384, see 11.3 |
+| 6 | RoPE cos/sin recomputed per layer | **confirmed** (minor) | Computed once per forward per theta |
+| 7 | Optimizer parameter groups | **accepted** | No weight decay on norms, biases or embeddings when `training/` is written |
+
+### 11.2 Strategy
+
+| # | Suggestion | Status | Notes |
+|---|---|---|---|
+| 1 | Newer baselines | **confirmed** | granite-embedding-97m-multilingual-r2: 97M, 384-dim, ModernBERT architecture, built by layer pruning, vocabulary selection (about 180k tokens), contrastive fine-tuning and distillation; 60.3 on multilingual MTEB retrieval; Apache 2.0. jina-embeddings-v5-text-nano: 239M, EuroBERT-210M backbone, distilled from Qwen3-Embedding-4B, 65.5 MMTEB task mean, CC BY-NC. LEAF: 23M, English, L2 distillation from mxbai-embed-large-v1, no hard negatives, #1 among models of about 30M or less on MTEB v2 English as of late 2025. Added to section 7 |
+| 2 | Distillation as the main recipe | **accepted** | Supported by jina-v5 and LEAF, but both use pretrained backbones. Section 4 reordered: stage 4 is distillation, stage 6 the contrastive-only baseline. The 50M comparison is the central experiment |
+| 3 | Many more pretraining tokens for the 50M | **accepted as a test** | Plausible, since competitors saw trillions. Unproven for this setup. Ablation 8 in 3.3 measures the 30B vs 100B slope first |
+| 4 | Add parallel pairs for bitext mining | **accepted** | mGTE also used translation pairs. The Salesforce result concerned retrieval only. Parallel data is now included, filtered, and weighted among our 12 languages |
+| 5 | Pretrain at 8192 from the start | **accepted as an ablation** | Ablation 7 in 3.3 |
+| 6 | muP or depth-aware muP for transfer | **open** | CompleteP (depth-aware muP) and Completed(d)P exist and report transfer across width and depth, with 12–34% compute efficiency gains, but on decoder LLMs. Completed(d)P also reports that optimal hyperparameters do not transfer across training duration out of the box. Untested for MLM encoders, so a short 50M-to-100M check would come first |
+| 7 | Muon as a late ablation | **accepted** | Unchanged |
+
+### 11.3 Decision: 50M output dimension (resolved: option B)
+
+The 50M has hidden size 384, so a 768-dim output would be a rank-384 projection: twice the storage for the
+same information. IBM's 97M granite model also uses 384-dim output. Decided: the **50M outputs 384**
+(Matryoshka 384/256/128/64) with no projection layer, and the 100M and 200M stay at 768. The 100M (hidden
+576) is rank-limited to 576 by the same argument, to a smaller degree, and keeps 768 for now. During
+distillation, any mismatch with the teacher's dimension is handled by a projection head that exists only in
+training.
+
+---
+
+## 12. Sources
 
 - [ModernBERT](https://arxiv.org/html/2412.13663)
 - [mmBERT](https://arxiv.org/html/2509.06888v1)
@@ -584,3 +671,9 @@ synthetic-data LLM choice and license.
 - [MobileLLM](https://arxiv.org/pdf/2402.14905)
 - [GradCache](https://arxiv.org/pdf/2101.06983)
 - [FineWeb-2 dataset card](https://huggingface.co/datasets/HuggingFaceFW/fineweb-2/blob/cab26bb3cab1ca7c26bb13a48f80fc3d2def4620/README.md)
+- [granite-embedding-97m-multilingual-r2](https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2) and [IBM blog](https://huggingface.co/blog/ibm-granite/granite-embedding-multilingual-r2)
+- [jina-embeddings-v5-text-nano](https://huggingface.co/jinaai/jina-embeddings-v5-text-nano)
+- [LEAF](https://arxiv.org/html/2509.12539v1) and [MongoDB blog](https://mongodb.com/company/blog/engineering/leaf-distillation-state-of-the-art-text-embedding-models)
+- [Ettin: paired encoders and decoders](https://arxiv.org/html/2507.11412v1)
+- [CompleteP](https://arxiv.org/html/2505.01618v4) and [Completed(d)P](https://arxiv.org/pdf/2512.22382)
+- [FineWeb2-HQ-Plus](https://huggingface.co/datasets/epfml/FineWeb2-HQ-Plus)

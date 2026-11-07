@@ -13,7 +13,7 @@ from torch import nn
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 
 from .config import ModelConfig
-from .rope import RotaryEmbedding, apply_rope
+from .rope import apply_rope
 
 # flex_attention must be compiled to be fast and memory-efficient.
 _flex_attention = torch.compile(flex_attention)
@@ -49,21 +49,19 @@ class Attention(nn.Module):
         self.layer_type = layer_type
         self.num_heads = cfg.num_heads
         self.head_dim = cfg.head_dim
-        theta = cfg.rope_theta_global if layer_type == "global" else cfg.rope_theta_local
-        self.rope = RotaryEmbedding(cfg.head_dim, theta)
         self.qkv = nn.Linear(cfg.hidden_size, 3 * cfg.hidden_size, bias=False)
         self.out = nn.Linear(cfg.hidden_size, cfg.hidden_size, bias=False)
 
     def forward(
         self,
         x: torch.Tensor,
-        position_ids: torch.Tensor,
+        rope: dict[str, tuple[torch.Tensor, torch.Tensor]],
         block_masks: dict[str, BlockMask],
     ) -> torch.Tensor:
         batch, seq_len, hidden = x.shape
         qkv = self.qkv(x).view(batch, seq_len, 3, self.num_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 3, 1, 4)  # each (B, H, T, D)
-        cos, sin = self.rope.cos_sin(position_ids)
+        cos, sin = rope[self.layer_type]
         q, k = apply_rope(q, k, cos, sin)
         attn = _flex_attention(q, k, v, block_mask=block_masks[self.layer_type])
         return self.out(attn.transpose(1, 2).reshape(batch, seq_len, hidden))

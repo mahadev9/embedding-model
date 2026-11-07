@@ -14,5 +14,5 @@ rope_theta_local: 10000
 rope_theta_global: 10000 # set to 160000 for the context-extension stage
 
 pooling: cls # ablate: cls vs mean
-output_dim: 768
-matryoshka_dims: [768, 512, 256, 128]
+output_dim: 384 # equals hidden_size, so no projection (a 768-dim output would be rank-limited to 384)
+matryoshka_dims: [384, 256, 128, 64]

@@ -26,6 +26,7 @@ class ModelConfig:
     norm_eps: float = 1e-5
 
     # Attention layout: layer i is global when i % global_every == 0, otherwise sliding-window.
+    # The last layer is always global, so the pooled CLS token sees the whole document.
     global_every: int = 3
     local_window: int = 128
     max_position: int = 8192
@@ -72,7 +73,8 @@ class ModelConfig:
     @property
     def layer_types(self) -> tuple[Literal["global", "local"], ...]:
         return tuple(
-            "global" if i % self.global_every == 0 else "local" for i in range(self.num_layers)
+            "global" if i % self.global_every == 0 or i == self.num_layers - 1 else "local"
+            for i in range(self.num_layers)
         )
 
     @property

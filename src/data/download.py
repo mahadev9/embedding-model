@@ -1,15 +1,15 @@
 """Download pretraining text into <repo>/data/. Safe to re-run: existing files are skipped.
 
-    # Small balanced text sample per language (for the tokenizer): streams ~300 MB of text each.
-    # Saved under data/sample/ (always local). Bulk shards go to $EMBEDDING_RAW_DIR if set.
-    python -m src.data.download sample --mb 300
+# Small balanced text sample per language (for the tokenizer): streams ~300 MB of text each.
+# Saved under data/sample/ (always local). Bulk shards go to $EMBEDDING_RAW_DIR if set.
+python -m src.data.download sample --mb 300
 
-    # Whole parquet shards for the main corpus (each FineWeb-2 shard is ~4 GiB).
-    python -m src.data.download shards --source fineweb2-hq-plus --langs es fr --num-shards 2
-    python -m src.data.download shards --source fineweb-edu --num-shards 3
-    python -m src.data.download shards --source wikipedia --langs hi ko
+# Whole parquet shards for the main corpus (each FineWeb-2 shard is ~4 GiB).
+python -m src.data.download shards --source fineweb2-hq-plus --langs es fr --num-shards 2
+python -m src.data.download shards --source fineweb-edu --num-shards 3
+python -m src.data.download shards --source wikipedia --langs hi ko
 
-    # Remove everything this script downloaded or derived:  rm -rf data/  (and $EMBEDDING_RAW_DIR)
+# Remove everything this script downloaded or derived:  rm -rf data/  (and $EMBEDDING_RAW_DIR)
 """
 
 from __future__ import annotations
@@ -80,8 +80,8 @@ def stream_text_sample(
 ) -> tuple[int, int]:
     """Stream rows from remote parquet shards, in order, until `budget_bytes` of text is read.
 
-    Only the parquet pages that are read are transferred, not whole multi-GiB shards. Later shards
-    are used only if earlier ones run out (some shards are small). Returns (text bytes, shards used).
+    Only the parquet pages that are read are transferred, not whole multi-GiB shards. Later
+    shards are used only if earlier ones run out (some are small). Returns (text bytes, shards).
     """
     fs = HfFileSystem()
     texts: list[str] = []
@@ -148,7 +148,9 @@ def cmd_shards(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawTextHelpFormatter
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     all_codes = [lang.code for lang in LANGUAGES]
 

@@ -12,7 +12,7 @@ import time
 
 import torch
 
-from src.model import MLMModel, build_block_masks, load_model_config
+from src.model import MLMModel, build_block_masks, load_model_config, select_masked
 
 DEVICE = "cuda"
 
@@ -33,14 +33,20 @@ def make_packed_batch(
 def bench(size: str, seq_len: int, tokens_per_batch: int, mean_doc_len: int, iters: int) -> None:
     cfg = load_model_config(size)
     batch = tokens_per_batch // seq_len
+    num_masked = int(0.31 * tokens_per_batch)  # fixed across steps -> static shapes
     model = MLMModel(cfg).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True)
     compiled = torch.compile(model)
-    input_ids, doc_ids, labels = make_packed_batch(batch, seq_len, cfg.vocab_size, mean_doc_len)
 
     def step() -> None:
+        # A fresh batch (new documents, new masks) every step, as in real training. Block masks
+        # and masked-position selection happen outside the compiled model.
+        input_ids, doc_ids, labels = make_packed_batch(batch, seq_len, cfg.vocab_size, mean_doc_len)
+        block_masks = build_block_masks(doc_ids, cfg.local_window)
+        positions, targets = select_masked(labels, num_masked)
         with torch.autocast("cuda", torch.bfloat16):
-            compiled(input_ids, doc_ids, labels).backward()
+            loss = compiled(input_ids, doc_ids, positions, targets, block_masks=block_masks)
+        loss.backward()
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
@@ -53,15 +59,6 @@ def bench(size: str, seq_len: int, tokens_per_batch: int, mean_doc_len: int, ite
             step()
         torch.cuda.synchronize()
         sec = (time.perf_counter() - start) / iters
-
-        # Cost of building the two block masks, which happens once per batch.
-        build_block_masks(doc_ids, cfg.local_window)
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        for _ in range(iters):
-            build_block_masks(doc_ids, cfg.local_window)
-        torch.cuda.synchronize()
-        mask_ms = (time.perf_counter() - start) / iters * 1e3
     except torch.OutOfMemoryError:
         print(f"{size} T={seq_len}: OOM at {tokens_per_batch} tokens/batch")
         return
@@ -69,7 +66,7 @@ def bench(size: str, seq_len: int, tokens_per_batch: int, mean_doc_len: int, ite
     tok_per_s = tokens_per_batch / sec
     print(
         f"{size} non-emb={cfg.non_embedding_params / 1e6:.0f}M T={seq_len:5d} "
-        f"docs~{mean_doc_len} {tok_per_s / 1e3:7.1f}k tok/s  mask-build {mask_ms:5.1f} ms  "
+        f"docs~{mean_doc_len} {tok_per_s / 1e3:7.1f}k tok/s  "
         f"mem={torch.cuda.max_memory_allocated() / 2**30:.1f}GB  "
         f"-> {tok_per_s * 86400 / 1e9:.1f}B tok/day"
     )
