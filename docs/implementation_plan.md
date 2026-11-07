@@ -145,15 +145,40 @@ embedding probe.
 
 ```
 Stage 0  Data + tokenizer
-Stage 1  MLM pretraining (warmup-stable) ──► Stage 2 Context extension to 8192 (RoPE 160k)
-         ──► Stage 3 Decay phase (low mask rate, language mix annealed) ──► merge checkpoints
-Stage 4  Distillation pretraining from cached teacher embeddings (main recipe)
-Stage 5  Contrastive fine-tuning (hard negatives, MRL, instruction prefixes)
-Stage 6  Contrastive-only baseline (large batch, weak pairs, in-batch negatives)  [educational baseline]
-         ──► merge / soup
-Stage 7  Long-context embedding fine-tune (short stage)
-Phase 2  Cross-encoder reranker
+Stage 1  MLM pretraining ──► Stage 2 Context extension (RoPE 160k) ──► Stage 3 Decay ──► merge
+                              (one shared checkpoint: everything below starts from it)
+                                              │
+         ┌────────────────────────────────────┼────────────────────────────────────┐
+   Arm A: Stage 4                      Arm B: Stage 6 ──► Stage 5           Arm C: Stage 4 ──► Stage 5
+   distill only                        contrastive only                     distill, then contrastive
+         └────────────────────────────────────┼────────────────────────────────────┘
+                                              ▼
+                       best arm ──► merge / soup ──► Stage 7 long-context ──► Phase 2 reranker
 ```
+
+Stage 6 is a separate branch from the Stage 3 checkpoint, not a step after Stage 5.
+
+### 4.1 The central experiment: three arms with matched compute
+
+Question: does distillation help a from-scratch student, and does it replace or complement contrastive
+training? Run at 50M first. All three arms start from the same Stage 3 checkpoint.
+
+| Arm | Recipe | Compute after Stage 3 |
+|---|---|---|
+| A, distill only | Stage 4 | X + Y |
+| B, contrastive only | Stage 6, then Stage 5 | X for Stage 6, then Y for Stage 5 |
+| C, both | Stage 4, then Stage 5 | X for Stage 4, then Y for Stage 5 |
+
+Rules so the comparison is fair:
+- **Same total budget:** every arm gets X + Y GPU-hours (A gets all of it in Stage 4, since it has no Stage 5).
+  Also record examples seen, since the stages consume different data.
+- **Same starting checkpoint**, tokenizer, evaluation subset, and at least two seeds if time allows.
+- **Identical hard negatives for B and C.** Mine them once, before the experiment, with a common miner (for
+  example the teacher plus a reranker filter), not with each arm's own earlier model. Otherwise arms differ in
+  their negatives as well as their recipe.
+- **Teacher caching is a shared one-time cost.** Report it separately instead of charging it to X or Y.
+- Report results by task type and by Matryoshka size, not only the overall mean.
+- Stage 7 and the reranker run only for the winning arm.
 
 ### Stage 0: Data and tokenizer
 
@@ -212,7 +237,16 @@ comparison (distill vs contrastive-only vs both) is the project's central experi
   (768 dims, fp16), so 20–50M texts is 30–75 GB, which fits on the HDD.
 - **Loss:** L2 or cosine between student and cached teacher embeddings (LEAF). Add a KL loss on the
   in-batch similarity matrices *(mine)*, and optionally EmbeddingGemma's spread-out regularizer. If the
-  student's output size differs from the teacher's, use a projection head that exists only in training.
+  student's output size differs from the teacher's, do not add a training-only head (see Targets below).
+- **Targets (no projection head):** cache the teacher's embeddings once at 768 dims, fp16 (the 0.6B teacher's
+  native 1024, truncated and re-normalized). The 100M and 200M match the 768-dim vector directly. The 50M
+  matches the first 384 dims, re-normalized. The student's nested Matryoshka sizes match the same-size
+  prefixes of the teacher vector, re-normalized. So the vector you ship is exactly the vector you trained,
+  and the 384-dim targets cost nothing extra to store.
+- **Gating check before caching (M4):** the model card lists "MRL Support: Yes" with output sizes from 32 to
+  1024, but gives no quality numbers at smaller sizes, and the paper does not describe Matryoshka training.
+  So measure the teacher itself at 1024, 768, 384, 256, 128 and 64 dims on our 12-language subset. If 384 is
+  clearly weak, fall back to distilling from the full 1024-dim vector through a training-only head.
 - **Queries vs documents:** embed queries with the teacher's query instruction and documents without, and
   give the student matching prefixes.
 - **Batch size** can be small, so GradCache is optional here, unlike stage 6.
@@ -220,8 +254,8 @@ comparison (distill vs contrastive-only vs both) is the project's central experi
 
 ### Stage 5: Contrastive fine-tuning (after distillation)
 
-- Positives plus **mined hard negatives** (mGTE: 1 positive + 8 hard negatives; Salesforce: 7). Mine with the
-  stage-4 model, using a rank window (for example, ranks 10–100) and filtering likely false negatives
+- Positives plus **mined hard negatives** (mGTE: 1 positive + 8 hard negatives; Salesforce: 7). Mine once with a
+  common miner fixed before the arms experiment (section 4.1), using a rank window (for example, ranks 10–100) and filtering likely false negatives
   (drop negatives scoring above 95% of the positive's score, or use a teacher reranker to filter).
 - Add the MRL loss over the model's Matryoshka sizes (768/512/256/128, or 384/256/128/64 for the 50M;
   EmbeddingGemma's setup).
@@ -308,12 +342,17 @@ without checkpointing, and 16k tokens uses about 15 GB.
 | Stage | 50M | 200M |
 |---|---|---|
 | MLM pretraining, 1024 context | ~30B tokens, about 1.4 days | ~25B tokens, about 3.5–4.5 days |
+| Option: longer MLM run | ~100B tokens, about 4.5 days | ~100B tokens, about 14 days |
 | Context extension + decay | ~5B tokens, a few hours | ~5B tokens, about 1 day |
-| Contrastive + fine-tuning | 1–2 days | 3–5 days |
-| Distillation + merging | hours | 1–2 days |
+| **Teacher caching** (encode 20–50M texts with Qwen3-Embedding-0.6B, shared by arms A and C) | **TBD, measured in M4** | same cache, no extra cost |
+| Experiment arms A, B, C (section 4.1), budget X + Y each | TBD after teacher speed is known | TBD, run only for the winning recipe |
+| Merging, long-context stage | hours | about 1 day |
 
-Expect real numbers to run 20–40% slower. Budget in total roughly a week for 50M including ablations, and
-two to three weeks for the 200M.
+The earlier placeholders for contrastive and distillation (1–2 days, hours) are removed: they predate the
+distillation-first recipe and had no basis once the teacher cost became the largest new item. Teacher
+caching is a one-time cost, so its size (corpus of 20–50M texts at whatever the teacher's speed allows)
+decides how large X and Y can be. Expect real numbers to run 20–40% slower than benchmarks. The longer MLM
+run is only worth its days if the 30B vs 100B slope ablation (3.3, item 8) shows a gain.
 
 ### 5.5 Repository layout (proposed)
 
@@ -497,8 +536,8 @@ text bytes, so no language dominates the vocabulary.
 3. **M2 Model and MLM loop at 50M:** model code, correctness checks and the packing throughput check are
    done (5.6). The MLM training loop, data loader and a short sanity run remain.
 4. **M3 50M ablations** (section 3.3), then a full 50M pretraining run.
-5. **M4 Teacher benchmark and distillation pipeline at 50M**: measure teacher encoding speed, cache
-   teacher embeddings, distillation loop, evaluation harness with all baselines.
+5. **M4 Teacher benchmark and distillation pipeline at 50M**: measure teacher encoding speed and its quality
+   at truncated dimensions (gating check), cache teacher embeddings, distillation loop, evaluation harness with all baselines.
 6. **M5 Contrastive pipeline and ablations at 50M**: hard-negative mining, MRL, GradCache baseline run,
    distill vs contrastive vs both, merging.
 7. **M6 Scale to 200M** with the best recipe. 100M if time allows.
@@ -521,7 +560,10 @@ text bytes, so no language dominates the vocabulary.
 - **Teacher cost is unmeasured:** how fast Qwen3-Embedding-0.6B encodes on the 5090 sets the corpus size.
 - **Realistic goal:** the leading small models start from trillion-token pretrained backbones. Aim for best
   from-scratch model in each class, or best on specific task types or languages, not best overall.
-- **Open decisions:** tokenizer size, 50M output dimension, Muon, and whether to test muP/CompleteP.
+- **Teacher truncation quality is unverified:** the Qwen3-Embedding card lists Matryoshka support (32–1024
+  dimensions) but gives no quality numbers, and the paper does not describe Matryoshka training. The student
+  targets at 384 and smaller depend on this, so it is a gating check in M4 (see Stage 4).
+- **Open decisions:** tokenizer size, Muon, and whether to test muP/CompleteP.
 
 ---
 
@@ -652,8 +694,8 @@ The 50M has hidden size 384, so a 768-dim output would be a rank-384 projection:
 same information. IBM's 97M granite model also uses 384-dim output. Decided: the **50M outputs 384**
 (Matryoshka 384/256/128/64) with no projection layer, and the 100M and 200M stay at 768. The 100M (hidden
 576) is rank-limited to 576 by the same argument, to a smaller degree, and keeps 768 for now. During
-distillation, any mismatch with the teacher's dimension is handled by a projection head that exists only in
-training.
+distillation the teacher targets are Matryoshka-truncated prefixes of its embedding, so no training-only head
+is needed (see Stage 4 for the gating check).
 
 ---
 
