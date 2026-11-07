@@ -1,0 +1,18 @@
+# 200M-class model: the main target (non-embedding ~200M).
+name: embed-200m
+
+hidden_size: 768
+num_layers: 26
+num_heads: 12
+intermediate_size: 2304
+vocab_size: 64000
+
+global_every: 3
+local_window: 128
+max_position: 8192
+rope_theta_local: 10000
+rope_theta_global: 10000 # set to 160000 for the context-extension stage
+
+pooling: cls # ablate: cls vs mean
+output_dim: 768
+matryoshka_dims: [768, 512, 256, 128]

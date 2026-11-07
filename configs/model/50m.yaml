@@ -1,0 +1,18 @@
+# 50M-class model: pipeline test and ablation platform (non-embedding ~52M).
+name: embed-50m
+
+hidden_size: 384
+num_layers: 22
+num_heads: 6
+intermediate_size: 1536
+vocab_size: 64000
+
+global_every: 3
+local_window: 128
+max_position: 8192
+rope_theta_local: 10000
+rope_theta_global: 10000 # set to 160000 for the context-extension stage
+
+pooling: cls # ablate: cls vs mean
+output_dim: 768
+matryoshka_dims: [768, 512, 256, 128]

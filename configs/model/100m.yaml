@@ -1,0 +1,18 @@
+# 100M-class model (optional, built last; non-embedding ~95M).
+name: embed-100m
+
+hidden_size: 576
+num_layers: 22
+num_heads: 9
+intermediate_size: 1728
+vocab_size: 64000
+
+global_every: 3
+local_window: 128
+max_position: 8192
+rope_theta_local: 10000
+rope_theta_global: 10000 # set to 160000 for the context-extension stage
+
+pooling: cls # ablate: cls vs mean
+output_dim: 768
+matryoshka_dims: [768, 512, 256, 128]
