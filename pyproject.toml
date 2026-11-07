@@ -1,3 +1,27 @@
+[build-system]
+requires = ["setuptools>=78,<79"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "embedding-model"
+version = "0.1.0"
+description = "From-scratch multilingual text embedding models (50M / 100M / 200M) trained on one RTX 5090"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    # CUDA 13.0 build; install with --extra-index-url https://download.pytorch.org/whl/cu130
+    "torch==2.14.1",
+    "pyyaml==6.0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff==0.17.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"
