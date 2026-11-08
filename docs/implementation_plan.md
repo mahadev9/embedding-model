@@ -456,7 +456,7 @@ constants come from machine summaries of those papers and are unverified.
 | Rows | contiguous 1024-token windows of each language's token stream; documents packed, attention masked across `[CLS]` boundaries; a document cut by a window edge becomes two | no padding, nothing dropped |
 | Disk reads | runs of 16 consecutive rows per read | the HDD handles about 100–150 random reads/s; training needs about 250 rows/s at 50M |
 | Determinism | batch contents depend only on (seed, step); per-language row cursors are saved in checkpoints | exact resume |
-| Data pin | `snapshots/corpus_10B.json` until the 40B extension is done | loaders never read past the snapshot counts |
+| Data pin | `snapshots/corpus_10B.json` for sweeps and ablations; `corpus_40B.json` for the long runs | loaders never read past the snapshot counts, for train or validation |
 | Validation | per-language MLM loss on 0.5M held-out tokens per language, fixed masks, every 100M training tokens; macro average over languages is the headline number | |
 | Checkpoints | `latest` every 100M tokens, a kept copy every 1B | |
 | Logging | JSONL file per run (loss, learning rate, tokens/s, update-clip statistic, memory) | no external services |
@@ -492,6 +492,48 @@ At about 230k tokens/s a 1B-token run takes about 72 minutes and the planned 30B
 The first learning-rate sweep (1B tokens per value, about 5 hours for four values) is the next GPU job.
 Notes: the optimizer step is a per-tensor Python loop, which costs little at this step size (about 2 s);
 checkpoints hold weights and optimizer (1.07 GB for the 50M) and a weights-only copy every 1B tokens.
+
+### 5.9 Learning-rate sweep results (50M, 1B tokens each, 2026-11-07)
+
+Four runs of the 50M model, same seed, same data order and masks, same schedule shape (warmup 200 steps,
+constant, 1 - sqrt decay over the last 190 steps), `python -m src.training.sweep`. Each took 75–77 minutes
+at about 230k tokens/s.
+
+| Peak LR | Final macro val loss | Gain vs previous rate | Max update RMS | Loss spikes | NaN |
+|---|---|---|---|---|---|
+| 2e-4 | 4.335 | | 2.26 | 0 | 0 |
+| 4e-4 | 3.546 | -0.789 | 2.21 | 0 | 0 |
+| 8e-4 | 3.181 | -0.365 | 2.38 | 0 | 0 |
+| **1.6e-3** | **3.055** | **-0.127** | 2.76 | 0 | 0 |
+
+Per-language final loss (1B tokens):
+
+| LR | en | zh | es | fr | de | pt | ru | ja | ar | hi | ko | it |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2e-4 | 4.01 | 5.37 | 3.85 | 3.73 | 4.19 | 4.08 | 3.56 | 4.78 | 4.96 | 4.27 | 5.01 | 4.20 |
+| 4e-4 | 3.38 | 4.50 | 3.18 | 3.03 | 3.38 | 3.31 | 2.92 | 3.92 | 4.04 | 3.41 | 4.05 | 3.43 |
+| 8e-4 | 3.06 | 4.06 | 2.87 | 2.71 | 3.00 | 2.96 | 2.59 | 3.55 | 3.63 | 3.05 | 3.62 | 3.06 |
+| 1.6e-3 | 2.95 | 3.93 | 2.75 | 2.59 | 2.87 | 2.83 | 2.47 | 3.44 | 3.49 | 2.93 | 3.49 | 2.92 |
+
+**Findings.**
+1. **The best rate is the top of the grid, and it is stable.** 1.6e-3 won in every language, with no spikes,
+   no NaN, and the lowest loss jitter (0.017). The sweep did not find where training becomes unstable.
+2. **Returns diminish quickly:** each doubling gained 0.79, 0.37, then 0.13. At this horizon the optimum is
+   near 1.6e-3, possibly a little above it.
+3. **The lead of 1.6e-3 over 8e-4 narrowed, then reopened.** It was -0.78 at 199M tokens, shrank to -0.09 at
+   897M, and widened to -0.13 during the decay phase (an earlier prediction of mine, that it would keep
+   shrinking, was wrong).
+4. **Annealing helps higher rates more.** The loss improvement per 100M tokens during the decay phase,
+   relative to the slope just before it, was 0.62x (2e-4), 1.05x (4e-4), 1.98x (8e-4) and 3.13x (1.6e-3).
+   High rates do bounce around the minimum, and lowering the rate recovers it, but after annealing the
+   higher rate still wins at this horizon.
+5. **This is an early-training measurement.** The loss is about 3, still dropping fast, and the horizon is
+   1B of the planned 30B tokens. Optimal rates generally fall as the horizon grows (and, per the
+   Completed(d)P paper, do not transfer across training length), so 1.6e-3 is an upper bound for the long run.
+
+**Decision pending:** whether to (a) run 3.2e-3 at 1B tokens to find the top of the curve, and (b) run
+8e-4 and 1.6e-3 (and possibly 4e-4) at about 3B tokens to see whether the order changes before fixing the
+rate for the 30B run.
 
 ---
 
@@ -865,6 +907,24 @@ move `plan.json` aside and rerun with a larger `--total-tokens`. To make experim
 growth, `--snapshot NAME` records each language's token counts to `snapshots/NAME.json`; readers use only up
 to those counts. `snapshots/corpus_10B.json` (10,016,130,123 train tokens) pins the first 10B, which the 50M
 ablations use while the extension runs in the background at low CPU priority (`nice`).
+
+**Extension result (finished 2026-11-07 evening, about 4.5 h at low priority).** 40.01B training tokens and
+80.6M validation tokens, 150 GB on the HDD (1.7 TB free). Every language reached its quota:
+
+| Language | Train tokens | Documents | | Language | Train tokens | Documents |
+|---|---|---|---|---|---|---|
+| en | 6.11B | 5.47M | | ja | 3.18B | 3.84M |
+| zh | 4.14B | 4.14M | | ar | 1.48B | 1.39M |
+| es | 3.61B | 3.74M | | hi | 0.82B | 0.85M |
+| fr | 3.40B | 3.33M | | ko | 1.28B | 1.25M |
+| de | 4.13B | 4.43M | | it | 2.70B | 2.80M |
+| pt | 2.29B | 2.46M | | ru | 6.88B | 3.47M |
+
+Checks: file sizes equal the recorded counts; all ids below 96,000; the original 10B tokens are unchanged
+(the old data still ends in `[SEP]` and the appended data starts with `[CLS]`); appended text decodes
+cleanly in all 12 languages. `snapshots/corpus_40B.json` pins the full 40.01B; `corpus_10B.json` still pins
+the first 10B (sweeps and ablations). Validation text is pinned the same way, so a snapshot's validation
+loss stays comparable after growth.
 
 ### 10.4 Still open (deferred until needed)
 
