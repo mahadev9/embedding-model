@@ -537,6 +537,47 @@ rate for the 30B run.
 
 ---
 
+### 5.10 Constant-rate trunks with decay branches (50M): plan and status
+
+Follow-up to 5.9, based on the WSD paper (Wen et al., 2024): run constant-rate trunks and branch
+short decays from their checkpoints, instead of fixing the horizon in advance. Research notes: the
+constant phase makes progress along the loss valley, the decay phase removes the oscillation, and a
+late decay beats an early one; re-warming after a decay (Ibrahim et al., 2024) is meant for new
+data and risks forgetting, so we continue from pre-decay checkpoints instead.
+
+**Tools.** `schedule.decay_fraction=0` keeps the rate constant. Full checkpoints (with optimizer
+state) are written every 1B tokens as `ckpt_<label>.pt` (label like `3.00B`). `--stop-at-tokens`
+pauses a run; rerunning the same command continues it. `python -m src.training.branch --from-run
+RUN --label 3.00B --name NAME --decay-tokens 3e8 [--hold-lr 4e-4 --hold-tokens 3e8]` copies a
+checkpoint and trains on the same data stream with an optional lower-rate hold, then a 1-sqrt decay
+to zero; the trunk is untouched. Verified: a branch whose hold rate equals the trunk's reproduces
+the trunk's losses bit for bit, and the decay reaches ~0.
+
+**Setup.** 50M model, corpus snapshot `corpus_40B` (20B tokens is half an epoch, no repetition),
+same seed and data stream for every run. Trunk A is named `main-lr1.6e-3`, trunk B `main-lr8e-4`.
+
+| # | Step | Time | Status |
+|---|---|---|---|
+| 1 | Trunk A: 1.6e-3 constant, 0 to 3B tokens (`--stop-at-tokens 3e9`) | 3.6 h | todo |
+| 2a | Branch from A at 1B: decay 0.1B tokens (`decay-1.00B`) | 7 min | todo |
+| 2b | Branch from A at 3B: decay 0.3B (`decay-3.00B`), the reference result | 21 min | todo |
+| 2c | Branch from A at 3B: hold 4e-4 for 0.3B, then decay 0.3B (`hold4e-4-3.00B`) | 42 min | todo |
+| 3a | Trunk B: 8e-4 constant, 0 to 3B tokens | 3.6 h | todo |
+| 3b | Branch from B at 3B: decay 0.3B | 21 min | todo |
+| - | **Decision:** pick the peak rate from 2b, 2c, 3b (lowest decayed macro val loss at 3B) | | todo |
+| 4 | Continue the winning trunk from 3B to 10B | 8.3 h | todo |
+| 4b | Branch at 10B: decay 1B tokens | 71 min | todo |
+| 5 | Continue the winning trunk from 10B to 20B | 11.8 h | todo |
+| 5b | Branch at 20B: decay 2B tokens (final 50M model) | 2.4 h | todo |
+
+Total about 32.5 h, one job on the GPU at a time. Both trunks are constant-rate runs, so the loser
+simply stops at 3B and the winner continues: nothing is restarted. What this answers: whether the
+best peak rate holds at a longer horizon (2b vs 3b), whether high-then-lower beats constant-then-
+decay (2c vs 2b), and whether the decayed loss keeps improving with horizon (1B, 3B, 10B, 20B).
+Not covered: peak rates above 1.6e-3 (3.2e-3 would need its own stability probe).
+
+Results go below as each step finishes.
+
 ## 6. Datasets
 
 | Purpose | Dataset | License / note |

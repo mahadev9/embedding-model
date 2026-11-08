@@ -21,7 +21,11 @@ schedule:
   total_tokens: 3.0e10
   warmup_fraction: 0.01
   min_warmup_steps: 200
-  decay_fraction: 0.10
+  decay_fraction: 0.10 # 0 = constant rate until the run is stopped
+  # Used by src.training.branch (override decay_fraction when set):
+  decay_tokens: null # length of the final 1-sqrt decay
+  hold_tokens: 0 # optional stage at hold_lr between the stable phase and the decay
+  hold_lr: null
 
 eval:
   every_tokens: 1.0e8

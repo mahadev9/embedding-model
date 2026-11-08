@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shutil
 import time
 from pathlib import Path
 
@@ -101,8 +102,8 @@ def save_checkpoint(
     tmp = run_dir / "latest.pt.tmp"
     torch.save(payload, tmp)
     tmp.rename(run_dir / "latest.pt")
-    if keep:
-        torch.save({"model": model.state_dict(), "step": step}, run_dir / f"model_{keep}.pt")
+    if keep:  # a full checkpoint (with optimizer state): src.training.branch can resume from it
+        shutil.copy(run_dir / "latest.pt", run_dir / f"ckpt_{keep}.pt")
 
 
 def main() -> None:
@@ -113,6 +114,11 @@ def main() -> None:
     parser.add_argument("--run-name", required=True)
     parser.add_argument(
         "--set", nargs="*", default=[], metavar="KEY=VALUE", help="dotted overrides"
+    )
+    parser.add_argument(
+        "--stop-at-tokens",
+        type=float,
+        help="pause after this many tokens (checkpoint saved); rerun the same command to continue",
     )
     args = parser.parse_args()
     cfg = load_config(args.config, args.set)
@@ -142,6 +148,12 @@ def main() -> None:
     total_steps = math.ceil(sch["total_tokens"] / tokens_per_step)
     warmup_steps = max(sch["min_warmup_steps"], int(sch["warmup_fraction"] * total_steps))
     decay_steps = int(sch["decay_fraction"] * total_steps)
+    hold_steps = 0
+    if sch.get("decay_tokens") is not None:
+        decay_steps = round(sch["decay_tokens"] / tokens_per_step)
+    if sch.get("hold_tokens"):
+        hold_steps = round(sch["hold_tokens"] / tokens_per_step)
+        assert sch.get("hold_lr"), "hold_tokens needs hold_lr"
 
     reader = CorpusReader(
         cfg["data"]["snapshot"], seq_len, cfg["data"]["run_rows"], seed=cfg["seed"]
@@ -157,7 +169,8 @@ def main() -> None:
 
     n_params = sum(p.numel() for p in model.parameters())
     print(
-        f"{model_cfg.summary()}\nsteps {total_steps} (warmup {warmup_steps}, decay {decay_steps}), "
+        f"{model_cfg.summary()}\nsteps {total_steps} (warmup {warmup_steps}, hold {hold_steps}, "
+        f"decay {decay_steps}), "
         f"{tokens_per_step} tokens/step, params {n_params / 1e6:.1f}M, languages {reader.codes}"
     )
 
@@ -177,7 +190,9 @@ def main() -> None:
     excluded = 0.0  # seconds in eval/checkpoint within the current logging window
     window_steps = 0
     for step, rows in zip(range(start_step, total_steps), loader, strict=False):
-        lr = wsd_lr(step, total_steps, o["lr"], warmup_steps, decay_steps)
+        lr = wsd_lr(
+            step, total_steps, o["lr"], warmup_steps, decay_steps, hold_steps, sch.get("hold_lr")
+        )
         for group in optimizer.param_groups:
             group["lr"] = lr
         generator = torch.Generator(DEVICE).manual_seed(cfg["seed"] * 1_000_003 + step)
@@ -228,11 +243,15 @@ def main() -> None:
                 flush=True,
             )
             excluded += time.time() - side_start
-        if done % ckpt_every == 0 or done == total_steps:
+        stopping = args.stop_at_tokens is not None and tokens >= args.stop_at_tokens
+        if done % ckpt_every == 0 or done == total_steps or stopping:
             side_start = time.time()
-            keep = f"{tokens / 1e9:.1f}B" if done % keep_every == 0 or done == total_steps else None
+            keep = f"{tokens / 1e9:.2f}B" if done % keep_every == 0 or done == total_steps else None
             save_checkpoint(run_dir, model, optimizer, done, cfg, keep)
             excluded += time.time() - side_start
+        if stopping and done < total_steps:
+            print(f"paused at step {done} ({tokens / 1e9:.2f}B tokens)", flush=True)
+            return
 
 
 if __name__ == "__main__":

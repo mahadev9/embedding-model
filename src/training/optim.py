@@ -76,13 +76,29 @@ def build_param_groups(model: nn.Module, weight_decay: float) -> list[dict]:
 
 
 def wsd_lr(
-    step: int, total_steps: int, peak_lr: float, warmup_steps: int, decay_steps: int
+    step: int,
+    total_steps: int,
+    peak_lr: float,
+    warmup_steps: int,
+    decay_steps: int,
+    hold_steps: int = 0,
+    hold_lr: float | None = None,
 ) -> float:
-    """Warmup-stable-decay: linear warmup, constant, then 1 - sqrt decay to zero."""
+    """Warmup-stable-decay: linear warmup, constant, then 1 - sqrt decay to zero.
+
+    Optionally a `hold_steps` stage at `hold_lr` sits between the stable phase and the decay (the
+    decay then starts from hold_lr). decay_steps = 0 keeps the rate constant to the last step.
+    """
     if step < warmup_steps:
         return peak_lr * (step + 1) / warmup_steps
     decay_start = total_steps - decay_steps
-    if step < decay_start:
+    hold_start = decay_start - hold_steps
+    if step < hold_start:
         return peak_lr
+    base = peak_lr
+    if hold_steps:
+        base = hold_lr
+        if step < decay_start:
+            return hold_lr
     progress = (step - decay_start) / max(decay_steps, 1)
-    return peak_lr * (1.0 - math.sqrt(min(progress, 1.0)))
+    return base * (1.0 - math.sqrt(min(progress, 1.0)))
