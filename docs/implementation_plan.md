@@ -558,15 +558,15 @@ same seed and data stream for every run. Trunk A is named `main-lr1.6e-3`, trunk
 
 | # | Step | Time | Status |
 |---|---|---|---|
-| 1 | Trunk A: 1.6e-3 constant, 0 to 3B tokens (`--stop-at-tokens 3e9`) | 3.6 h | todo |
-| 2a | Branch from A at 1B: decay 0.1B tokens (`decay-1.00B`) | 7 min | todo |
-| 2b | Branch from A at 3B: decay 0.3B (`decay-3.00B`), the reference result | 21 min | todo |
-| 2c | Branch from A at 3B: hold 4e-4 for 0.3B, then decay 0.3B (`hold4e-4-3.00B`) | 42 min | todo |
-| 3a | Trunk B: 8e-4 constant, 0 to 3B tokens | 3.6 h | todo |
+| 1 | Trunk A: 1.6e-3 constant, 0 to 3B tokens (`--stop-at-tokens 3e9`) | 3.6 h | done 2026-11-08: macro val 2.760 at 3B, no spikes, max update RMS 2.82 |
+| 2a | Branch from A at 1B: decay 0.1B tokens (`decay-1.00B`) | 7 min | dropped: 1B/2B checkpoints were not kept (bug, fixed) |
+| 2b | Branch from A at 3B: decay 0.3B (`decay-3.00B`), the reference result | 21 min | done: macro val 2.760 -> 2.612 (all 12 languages improved 0.12-0.17) |
+| 2c | Branch from A at 3B: hold 4e-4 for 0.3B, then decay 0.3B (`hold4e-4-3.00B`) | 42 min | done: 2.588 (-0.024 vs 2b in every language) but it trained 0.6B vs 0.3B tokens, so confounded; the control (plain 0.6B decay) is dropped in favour of a token-matched pair at 10B |
+| 3a | Trunk B: 8e-4 constant, 0 to 3B tokens | 3.6 h | on hold: decide after 2b/2c (weak predictor of the 20B optimum; 4 h) |
 | 3b | Branch from B at 3B: decay 0.3B | 21 min | todo |
 | - | **Decision:** pick the peak rate from 2b, 2c, 3b (lowest decayed macro val loss at 3B) | | todo |
-| 4 | Continue the winning trunk from 3B to 10B | 8.3 h | todo |
-| 4b | Branch at 10B: decay 1B tokens | 71 min | todo |
+| 4 | Continue trunk A (1.6e-3) from 3B to 10B (`--stop-at-tokens 1e10`) | 8.3 h | done: macro val 2.465 at 10B (undecayed), no plateau, max update RMS 2.04 |
+| 4b | Branches at 10B, token-matched: plain decay 1B (`decay-10.00B`), and optionally hold 4e-4 for 0.5B + decay 0.5B | 71 min each | plain decay done: 2.465 -> 2.348 at 11.0B (decayed 3B result was 2.612); hold variant running |
 | 5 | Continue the winning trunk from 10B to 20B | 11.8 h | todo |
 | 5b | Branch at 20B: decay 2B tokens (final 50M model) | 2.4 h | todo |
 
@@ -576,7 +576,10 @@ best peak rate holds at a longer horizon (2b vs 3b), whether high-then-lower bea
 decay (2c vs 2b), and whether the decayed loss keeps improving with horizon (1B, 3B, 10B, 20B).
 Not covered: peak rates above 1.6e-3 (3.2e-3 would need its own stability probe).
 
-Results go below as each step finishes.
+Note: the first launch kept no `ckpt_*` files at 1B and 2B, because keep points were only checked
+when a regular save was due (the two intervals do not line up); fixed in the trainer, so later runs
+keep a full checkpoint every 1B tokens. A's 3B branch point is the pause checkpoint (step 5723).
+Steps 2b and 2c run back to back (3a and 3b are on hold); results go below as each step finishes.
 
 ## 6. Datasets
 

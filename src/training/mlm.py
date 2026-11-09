@@ -244,7 +244,7 @@ def main() -> None:
             )
             excluded += time.time() - side_start
         stopping = args.stop_at_tokens is not None and tokens >= args.stop_at_tokens
-        if done % ckpt_every == 0 or done == total_steps or stopping:
+        if done % ckpt_every == 0 or done % keep_every == 0 or done == total_steps or stopping:
             side_start = time.time()
             keep = f"{tokens / 1e9:.2f}B" if done % keep_every == 0 or done == total_steps else None
             save_checkpoint(run_dir, model, optimizer, done, cfg, keep)
