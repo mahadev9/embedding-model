@@ -581,6 +581,38 @@ when a regular save was due (the two intervals do not line up); fixed in the tra
 keep a full checkpoint every 1B tokens. A's 3B branch point is the pause checkpoint (step 5723).
 Steps 2b and 2c run back to back (3a and 3b are on hold); results go below as each step finishes.
 
+### 5.11 Evaluating the pretrained encoder (50M, 10B tokens, 2026-11-09)
+
+Layers of evaluation, cheapest first: (1) per-language MLM validation loss (in every run log);
+(2) cross-model masked-token loss in bits per byte; (3) fine-tuning probes (XNLI, PAWS-X, WikiANN),
+English-trained and tested zero-shot on other languages; (4) a short contrastive fine-tune and the
+MMTEB subset (needs the Stage 5 code, not built yet); (5) long-context and Matryoshka checks later.
+Code: `src/eval/mlm_crossmodel.py`, `src/eval/finetune.py` (extra `pip install -e ".[eval]"` for
+transformers==5.22.2). Baseline models are cached on the HDD with the other Hugging Face files.
+
+**Layer 2** (`python -m src.eval.mlm_crossmodel`): the same held-out text (300 documents per
+language, 1200 UTF-8 bytes each, decoded from our validation files), the same masked 12-character
+blocks for every model, loss in bits per byte of masked tokens. Lower is better, macro over 12
+languages:
+
+| Model | mask 15% | mask 30% |
+|---|---|---|
+| ours, 10B + 1B-token decay (`decay-10.00B`) | 1.308 | 1.469 |
+| ours, 10B before decay | 1.341 | 1.501 |
+| mmBERT-small | 1.402 | 1.610 |
+| mmBERT-base | 1.275 | 1.485 |
+| XLM-R base | 1.429 | 1.627 |
+
+Ours beats mmBERT-small and XLM-R base, ties mmBERT-base at 30% masking and trails it slightly at
+15%. By language (15%) mmBERT-base is better in English (1.02 vs 1.25) and most European languages
+and Russian; ours is better in Hindi, Korean and Arabic; Chinese and Japanese are level. The decay
+is worth 0.033 bits at both rates. Caveats: the text is close to our own training distribution,
+the public models may have seen the same FineWeb-2 documents, and this is not an embedding test.
+
+**Layer 3** (`python -m src.eval.finetune`): linear head on [CLS] (token head for NER), AdamW, batch
+32, one seed, learning rate chosen from two values by English validation. Status: running
+(2026-11-09); results below when done.
+
 ## 6. Datasets
 
 | Purpose | Dataset | License / note |

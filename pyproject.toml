@@ -22,6 +22,9 @@ dependencies = [
 dev = [
     "ruff==0.17.4",
 ]
+eval = [
+    "transformers==5.22.2",  # baseline models for src/eval
+]
 
 [tool.setuptools.packages.find]
 include = ["src*"]
