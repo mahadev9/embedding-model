@@ -24,6 +24,7 @@ dev = [
 ]
 eval = [
     "transformers==5.22.2",  # baseline models for src/eval
+    "mteb==2.27.7",  # embedding benchmark tasks
 ]
 
 [tool.setuptools.packages.find]

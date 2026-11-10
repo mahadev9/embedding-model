@@ -5,8 +5,9 @@ e.g. on a large HDD:
 
     export EMBEDDING_RAW_DIR=/mnt/hdd-2tb/embedding-model/raw
 
-The tokenized corpus can be moved the same way with EMBEDDING_TOKENIZED_DIR. The Hugging Face caches
-follow RAW_DIR. Small data (audit, tokenizer sample, tokenizer) stays under DATA_DIR.
+The tokenized corpus can be moved the same way with EMBEDDING_TOKENIZED_DIR. The Hugging Face, MTEB,
+sentence-transformers and torch caches follow RAW_DIR. Small data (audit, tokenizer sample,
+tokenizer) stays under DATA_DIR.
 """
 
 from __future__ import annotations
@@ -33,3 +34,7 @@ def use_local_hf_cache() -> None:
     os.environ.setdefault("HF_HUB_CACHE", str(HF_CACHE_DIR / "hub"))
     os.environ.setdefault("HF_XET_CACHE", str(HF_CACHE_DIR / "xet"))
     os.environ.setdefault("HF_DATASETS_CACHE", str(HF_CACHE_DIR / "datasets"))
+    # Other libraries that would otherwise write under ~/.cache (the SSD).
+    os.environ.setdefault("MTEB_CACHE", str(RAW_DIR / ".mteb_cache"))
+    os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", str(RAW_DIR / ".sentence_transformers"))
+    os.environ.setdefault("TORCH_HOME", str(RAW_DIR / ".torch"))
