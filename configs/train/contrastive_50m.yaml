@@ -3,7 +3,8 @@ model: 50m
 init_from: decay-10.00B/latest.pt # RUN/FILE under RUNS_DIR; its encoder weights initialize the model
 
 data:
-  name: webfaq # <PAIRS_DIR>/<name>/<lang>.parquet from src.data.build_pairs
+  name: webfaq # a name or a list of names: <PAIRS_DIR>/<name>/*.parquet (src.data.build_pairs)
+  parallel_fraction: 0.0 # share of steps drawn from par_*.parquet translation files (build_parallel)
   val_per_language: 1000 # held out; the training pairs are the rest
   max_query: 64 # tokens
   max_passage: 256

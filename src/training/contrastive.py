@@ -49,21 +49,34 @@ CLS_ID, SEP_ID = 2, 3
 class PairData:
     """(query, positive) pairs per language, with a held-out validation slice."""
 
-    def __init__(self, name: str, val_per_lang: int, seed: int) -> None:
-        self.seed = seed
+    def __init__(
+        self, names: str | list[str], val_per_lang: int, seed: int, parallel_fraction: float = 0.0
+    ) -> None:
+        self.seed, self.parallel_fraction = seed, parallel_fraction
         self.train: dict[str, tuple[list[str], list[str]]] = {}
         self.val: dict[str, tuple[list[str], list[str]]] = {}
-        for path in sorted((PAIRS_DIR / name).glob("*.parquet")):
-            t = pq.read_table(path, columns=["query", "positive"]).to_pydict()
-            q, p = t["query"], t["positive"]
-            self.val[path.stem] = (q[:val_per_lang], p[:val_per_lang])
-            self.train[path.stem] = (q[val_per_lang:], p[val_per_lang:])
+        for name in [names] if isinstance(names, str) else names:
+            for path in sorted((PAIRS_DIR / name).glob("*.parquet")):
+                t = pq.read_table(path, columns=["query", "positive"]).to_pydict()
+                q, p = t["query"], t["positive"]
+                self.val[path.stem] = (q[:val_per_lang], p[:val_per_lang])
+                self.train[path.stem] = (q[val_per_lang:], p[val_per_lang:])
         self.codes = list(self.train)
         if not self.codes:
-            raise SystemExit(f"no pair files in {PAIRS_DIR / name}")
+            raise SystemExit(f"no pair files in {names}")
+        # Files named par_* hold translation pairs; the rest are ordinary text pairs.
+        self.parallel = [c for c in self.codes if c.startswith("par_")]
+        self.text = [c for c in self.codes if not c.startswith("par_")]
+        if parallel_fraction > 0 and not self.parallel:
+            raise SystemExit("parallel_fraction > 0 but there are no par_* files")
 
     def language(self, step: int) -> str:
-        return self.codes[np.random.default_rng([self.seed, step, 5]).integers(len(self.codes))]
+        """The file (one language, or one translation pair) that supplies this step's batch."""
+        rng = np.random.default_rng([self.seed, step, 5])
+        pool = self.codes
+        if self.parallel:
+            pool = self.parallel if rng.random() < self.parallel_fraction else self.text
+        return pool[rng.integers(len(pool))]
 
     def _order(self, code: str, epoch: int) -> np.ndarray:
         n = len(self.train[code][0])
@@ -186,7 +199,11 @@ def validate(model, data: PairData, tok, cfg) -> dict[str, float]:
         scores = q @ p.T
         rank = (scores > scores.diag()[:, None]).sum(dim=1) + 1
         out[code] = (1.0 / rank.float()).mean().item()
-    out["macro"] = sum(out.values()) / len(out)
+    text = [v for k, v in out.items() if not k.startswith("par_")]
+    out["macro"] = sum(text) / len(text)  # over the ordinary text languages, as in earlier runs
+    parallel = [v for k, v in out.items() if k.startswith("par_")]
+    if parallel:
+        out["par_macro"] = sum(parallel) / len(parallel)
     model.train()
     return out
 
@@ -246,7 +263,12 @@ def main() -> None:
     tok = Tokenizer.from_file(str(TOKENIZED_DIR / "tokenizer.json"))
     tok.no_truncation()
     tok.no_padding()
-    data = PairData(cfg["data"]["name"], cfg["data"]["val_per_language"], cfg["seed"])
+    data = PairData(
+        cfg["data"]["name"],
+        cfg["data"]["val_per_language"],
+        cfg["seed"],
+        cfg["data"].get("parallel_fraction", 0.0),
+    )
     batch_size = cfg["batch"]["pairs"]
     total_steps = math.ceil(cfg["schedule"]["total_pairs"] / batch_size)
     warmup = max(1, int(cfg["schedule"]["warmup_fraction"] * total_steps))
@@ -317,7 +339,9 @@ def main() -> None:
             log({"type": "eval", "step": done, "mrr": res})
             print(
                 f"  validation MRR macro {res['macro']:.4f}  "
-                + " ".join(f"{c} {v:.2f}" for c, v in res.items() if c != "macro"),
+                + " ".join(
+                    f"{c} {v:.2f}" for c, v in res.items() if c not in ("macro", "par_macro")
+                ),
                 flush=True,
             )
         if done % save_every == 0 or done == total_steps:
