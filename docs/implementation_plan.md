@@ -181,6 +181,44 @@ Rules so the comparison is fair:
 - Report results by task type and by Matryoshka size, not only the overall mean.
 - Stage 7 and the reranker run only for the winning arm.
 
+### 4.2 Optional but recommended: contrastive pretraining as a main stage (proposed 2026-11-10)
+
+Status: **not adopted yet.** Decide after the continued MLM training (the 20B trunk, section 5.10). Until
+then sections 4 and 4.1 above stand as written.
+
+Proposal (external review): make large-scale contrastive pretraining a shared main stage instead of arm B
+only, so the arms experiment asks what distillation adds on top of it, not whether it replaces it.
+
+```
+MLM (Stages 1-3) ──► weak-pair contrastive pretraining (Stage 6: 100M+ pairs, batch 8k+, GradCache)
+                                              │
+         ┌────────────────────────────────────┼────────────────────────────────────┐
+   Arm A: hard negatives only          Arm B: distillation only          Arm C: hard negatives + distillation
+         └────────────────────────────────────┼────────────────────────────────────┘
+                                              ▼
+                       best arm ──► merge / soup ──► Stage 7 long-context ──► Phase 2 reranker
+```
+
+Optional fourth arm at 50M only: distil straight from the MLM checkpoint (today's arm A). It keeps the
+original question, whether distillation can replace pair pretraining for a from-scratch student.
+
+Why it is recommended:
+- The "distillation first" evidence (jina-embeddings-v5, LEAF) is from pretrained backbones; for a
+  from-scratch student it is untested (Stage 4).
+- The reviewer reports that the strong small models checked (granite, harrier, DenseOn, Bekko) run hundreds
+  of millions of pairs first and distil afterwards. This matches e5, mGTE and granite; the harrier, DenseOn
+  and Bekko recipes are not verified by us.
+- Our probes (5.12, 5.13): with 1M pairs, retrieval is about 20 points below e5-small, and neither pooling
+  nor parallel pairs moved it.
+
+What it needs before it can start:
+- **Data (the main work):** we hold about 1M WebFAQ pairs and 440k parallel pairs. 100M+ needs much more
+  of WebFAQ, mined title-body and adjacent-passage pairs from FineWeb2 and Wikipedia, and the English
+  weak-pair sets in section 6.
+- **Compute:** the probe ran 1M pairs in 23 minutes, so about 38 hours per 100M pairs for the 50M at the
+  same text lengths (64/256 tokens); the 200M is not measured.
+- **Batch 8k+:** the trainer runs GradCache at batch 512; confirm memory and throughput with a short run.
+
 ### Stage 0: Data and tokenizer
 
 - **Text for MLM:** FineWeb-2 for the non-English languages (ODC-By 1.0), and an English quality source
