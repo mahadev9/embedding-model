@@ -636,6 +636,45 @@ gave 93.8. The baselines' best rates sit at the bottom of the grid, so their sco
 low; one seed, so differences under about 0.5 are noise. Masked-byte loss (layer 2) under-predicts
 these gaps, so use the tasks, not the loss, to judge pretraining changes.
 
+### 5.12 Layer 4: embedding probe on our MMTEB subset (50M, 2026-11-10)
+
+**Setup.** Contrastive probe `probe-a`: the 10B-token decayed encoder, fine-tuned on about 1M WebFAQ
+question-answer pairs (CC BY-4.0; 8 languages at 100k, zh 64k, ar 55k, hi 40k, ko 36k pairs;
+`src/data/build_pairs.py`), in-batch negatives with 512-pair single-language batches, GradCache,
+temperature 0.05, Matryoshka loss over 384/256/128/64, lr 1e-4, 1,954 steps, **23 minutes** (about
+85-90k tokens/s; `configs/train/contrastive_50m.yaml`, `src/training/contrastive.py`). Validation MRR
+(positive among 1,000 same-language candidates): 0.603 at step 250, 0.674 at the end; Japanese was
+lowest (0.46), the rest 0.65-0.75. WebFAQ is not among the evaluation tasks.
+
+**Evaluation.** `src/eval/mmteb.py` runs 17 MTEB/MMTEB tasks (bitext mining 2, classification 4,
+clustering 1, STS 3, pair classification 2, retrieval 5) on the language subsets that lie entirely
+within our 12 languages. `src/eval/compare.py` builds the comparison: baseline scores come from the
+public embeddings-benchmark/results repository where it has the subset and from our own runs where it
+does not (about 1 hour of gap runs); ours is always local. Our runner reproduces the public e5-small
+numbers (identical to two decimals on 4 tasks, within 1.2 points on 3 tasks with randomized
+classifiers). Percent, mean of the task-type means (macro) over all 17 tasks:
+
+| Model | Bitext | Classif. | Cluster | Pair | Retrieval | STS | Macro |
+|---|---|---|---|---|---|---|---|
+| EmbeddingGemma-300m | 94.9 | 78.7 | 44.0 | 71.5 | 76.5 | 81.2 | **74.5** |
+| multilingual-e5-base | 92.0 | 68.2 | 34.0 | 62.3 | 72.5 | 76.6 | 67.6 |
+| multilingual-e5-small | 90.5 | 66.1 | 36.2 | 63.2 | 67.2 | 75.3 | 66.4 |
+| granite-embedding-97m | 84.3 | 62.2 | 41.6 | 59.2 | 64.4 | 72.4 | 64.0 |
+| **ours, probe-a (50M)** | 53.8 | 59.1 | 41.0 | 55.9 | 47.4 | 63.3 | **53.4** |
+
+Per language (macro over monolingual subsets), ours vs e5-small: en 60.3/71.0, zh 60.8/65.9,
+es 58.9/68.2, fr 58.1/63.5, de 55.1/65.8, pt 56.9/60.4, ru 53.9/65.5, ja 54.3/62.7, ar 57.4/67.6,
+hi 51.5/65.1, ko 49.7/58.3, it 62.2/68.8.
+
+**Reading.** The probe is far smaller than the baselines' training (e5 and EmbeddingGemma use
+billions of pairs), so the 11-21 point macro gap is expected, not a ranking of recipes. The
+informative part is where the gap sits: bitext mining (53.8 vs 84-95) is by far the largest, because
+the training pairs are monolingual and nothing aligns translations; retrieval on large corpora
+(MIRACL, MLQA about 30) is second. Clustering (41.0, above e5) and SIB200 classification (47.0, level
+with e5 and granite) are close. Next experiments, cheapest first: add parallel-sentence pairs to the
+mix; distill from the teacher (central experiment, section 4.1); more pairs and hard negatives;
+CLS vs mean pooling. Caveats: single seed, single run; Hindi and Korean pairs were seen about twice.
+
 ## 6. Datasets
 
 | Purpose | Dataset | License / note |
