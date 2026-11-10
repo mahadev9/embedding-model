@@ -675,6 +675,42 @@ with e5 and granite) are close. Next experiments, cheapest first: add parallel-s
 mix; distill from the teacher (central experiment, section 4.1); more pairs and hard negatives;
 CLS vs mean pooling. Caveats: single seed, single run; Hindi and Korean pairs were seen about twice.
 
+### 5.13 Pooling and parallel-sentence probes (50M, 2026-11-10)
+
+**Setup.** Two variants of `probe-a`, same encoder, steps (1,954) and hyperparameters, one change each:
+
+- `probe-b`: mean pooling instead of CLS (`configs/model/50m_mean.yaml`).
+- `probe-c`: CLS, with translation pairs mixed in. Each batch is a parallel batch with probability
+  0.25 (`data.name=[webfaq,parallel]`, `data.parallel_fraction=0.25`), otherwise a WebFAQ batch.
+  Parallel data: WikiMatrix English-X sentence pairs for our 11 other languages, up to 40,000 per
+  pair after filtering (`src/data/build_parallel.py`, CC BY-SA).
+
+Validation MRR on WebFAQ (macro over 12 languages): probe-a 0.674, probe-b 0.665, probe-c 0.669.
+probe-c reaches 0.988 on held-out parallel pairs, which is saturated and not informative.
+
+Same 17 tasks and subsets as 5.12 (percent):
+
+| Model | Bitext | Classif. | Cluster | Pair | Retrieval | STS | Macro |
+|---|---|---|---|---|---|---|---|
+| probe-a (CLS) | 53.8 | 59.1 | 41.0 | 55.9 | 47.4 | 63.3 | 53.4 |
+| probe-b (mean) | 52.0 | 59.0 | 40.6 | 56.1 | 47.1 | 63.6 | 53.1 |
+| probe-c (CLS + parallel) | **73.2** | 59.1 | 37.8 | 55.8 | 47.1 | 61.6 | **55.8** |
+
+**Reading.**
+
+- Pooling: CLS is ahead by 0.3 macro, almost all of it bitext mining (Tatoeba 59.3 vs 56.0); the
+  other types are within 0.4. Keep CLS.
+- Parallel pairs: bitext mining rises 19.4 points (Tatoeba 59.3 to 70.2, NTREX 48.3 to 76.2), which
+  is the whole macro gain. This task mirrors the added training signal. Elsewhere it costs a little:
+  clustering -3.2, STS -1.7, and every language's monolingual average drops 1-2 points; retrieval and
+  classification are flat. The 0.25 fraction was not tuned; a smaller one may keep most of the gain.
+- Neither change moves retrieval (47 vs 64-77 for the baselines) or STS, the largest remaining gaps.
+  Those need the distillation and hard-negative experiments, not more mixing.
+
+Caveats: single seed, single run each. The first probe-c evaluation stalled when the GPU driver hung
+(no output for over 2 hours); after a reboot with updated drivers the rerun resumed from mteb's cached
+tasks and finished normally.
+
 ## 6. Datasets
 
 | Purpose | Dataset | License / note |
