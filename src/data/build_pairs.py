@@ -15,14 +15,16 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 
 from .paths import RAW_DIR, use_local_hf_cache
 
 use_local_hf_cache()
 import pyarrow as pa  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
-from huggingface_hub import HfFileSystem  # noqa: E402
+from huggingface_hub import HfFileSystem, get_session, hf_hub_url  # noqa: E402
 
 PAIRS_DIR = RAW_DIR / "pairs"
 WEBFAQ = {
@@ -32,31 +34,54 @@ WEBFAQ = {
 CHUNK_BYTES = 4_000_000
 
 
-def sample_language(fs: HfFileSystem, code: str, target: int, max_per_origin: int, seed: int):
-    path = f"datasets/PaDaS-Lab/webfaq/data/{WEBFAQ[code]}.jsonl"
-    size = fs.info(path)["size"]
-    rng = random.Random(f"{seed}-{code}")
-    rows, seen, per_origin = [], set(), Counter()
-    with fs.open(path, "rb") as f:
-        tries = 0
-        while len(rows) < target and tries < 400:
-            tries += 1
-            f.seek(rng.randrange(0, max(size - CHUNK_BYTES, 1)))
-            block = f.read(CHUNK_BYTES).decode("utf-8", errors="ignore")
-            for line in block.split("\n")[1:-1]:  # first and last lines are partial
-                try:
-                    r = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                q, a, origin = r["question"].strip(), r["answer"].strip(), r["origin"]
-                if len(q) < 8 or len(a) < 20 or q in seen or per_origin[origin] >= max_per_origin:
-                    continue
-                seen.add(q)
-                per_origin[origin] += 1
-                rows.append((q, a[:2000], code, origin))
-                if len(rows) >= target:
-                    break
+def fetch_chunk(url: str, offset: int, session) -> list[dict]:
+    """Rows from one random byte range of a jsonl file (first and last lines are partial)."""
+    for attempt in range(5):
+        try:
+            r = session.get(
+                url, headers={"Range": f"bytes={offset}-{offset + CHUNK_BYTES - 1}"}, timeout=60
+            )
+            r.raise_for_status()
+            break
+        except Exception:
+            if attempt == 4:
+                return []
+            time.sleep(2**attempt)
+    rows = []
+    for line in r.content.decode("utf-8", errors="ignore").split("\n")[1:-1]:
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
     return rows
+
+
+def sample_language(code: str, target: int, max_per_origin: int, seed: int, workers: int = 8):
+    url = hf_hub_url("PaDaS-Lab/webfaq", f"data/{WEBFAQ[code]}.jsonl", repo_type="dataset")
+    size = HfFileSystem().info(f"datasets/PaDaS-Lab/webfaq/data/{WEBFAQ[code]}.jsonl")["size"]
+    rng = random.Random(f"{seed}-{code}")
+    session = get_session()
+    rows, seen, per_origin = [], set(), Counter()
+    chunks_read = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        while len(rows) < target and chunks_read < 600:
+            offsets = [rng.randrange(0, max(size - CHUNK_BYTES, 1)) for _ in range(workers)]
+            for batch in pool.map(lambda o: fetch_chunk(url, o, session), offsets):
+                chunks_read += 1
+                for r in batch:
+                    q, a, origin = r["question"].strip(), r["answer"].strip(), r["origin"]
+                    if (
+                        len(q) < 8
+                        or len(a) < 20
+                        or q in seen
+                        or per_origin[origin] >= max_per_origin
+                    ):
+                        continue
+                    seen.add(q)
+                    per_origin[origin] += 1
+                    rows.append((q, a[:2000], code, origin))
+            print(f"  {code}: {len(rows)}/{target} pairs after {chunks_read} chunks", flush=True)
+    return rows[:target]
 
 
 def main() -> None:
@@ -70,7 +95,6 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    fs = HfFileSystem()
     out_dir = PAIRS_DIR / args.out_name
     out_dir.mkdir(parents=True, exist_ok=True)
     for code in args.langs:
@@ -78,7 +102,7 @@ def main() -> None:
         if out.exists():
             print(f"{code}: exists, skipping")
             continue
-        rows = sample_language(fs, code, args.per_language, args.max_per_origin, args.seed)
+        rows = sample_language(code, args.per_language, args.max_per_origin, args.seed)
         table = pa.table(
             dict(zip(("query", "positive", "lang", "origin"), zip(*rows, strict=True), strict=True))
         )
