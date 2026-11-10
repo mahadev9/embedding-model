@@ -610,8 +610,31 @@ is worth 0.033 bits at both rates. Caveats: the text is close to our own trainin
 the public models may have seen the same FineWeb-2 documents, and this is not an embedding test.
 
 **Layer 3** (`python -m src.eval.finetune`): linear head on [CLS] (token head for NER), AdamW, batch
-32, one seed, learning rate chosen from two values by English validation. Status: running
-(2026-11-09); results below when done.
+32, one seed, learning rate chosen from two values by English validation. Test scores, English-trained
+(en = English test; zero-shot = mean over the other languages; NER excludes zh and ja, whose WikiANN
+text is split into single characters, in the last column):
+
+| Task | Model | en | zero-shot | all langs |
+|---|---|---|---|---|
+| XNLI (accuracy) | ours, 10B tokens | 75.9 | 64.4 | 65.8 |
+| | mmBERT-small | 82.7 | 72.9 | 74.1 |
+| | mmBERT-base | 85.5 | 76.0 | 77.1 |
+| | XLM-R base | 81.7 | 72.4 | 73.5 |
+| PAWS-X (accuracy) | ours | 93.8 | 78.1 | 80.3 |
+| | mmBERT-small | 95.0 | 84.7 | 86.1 |
+| | mmBERT-base | 96.1 | 85.6 | 87.1 |
+| | XLM-R base | 93.5 | 82.7 | 84.3 |
+| NER (F1, excl. zh/ja zero-shot) | ours | 78.7 | 56.5 | 51.7 |
+| | mmBERT-small | 82.2 | 64.1 | 58.4 |
+| | mmBERT-base | 82.7 | 67.9 | 62.3 |
+| | XLM-R base | 82.8 | 66.1 | 60.0 |
+
+Ours trails mmBERT-small (the same 22 x 384 shape, about 300x more pretraining tokens) by 7 to 9
+points on every task, and XLM-R base by 6 to 8. English is closer (3 to 7 points) than the other
+languages. Our fine-tuning is learning-rate sensitive: PAWS at 4e-4 stayed at chance while 1.5e-4
+gave 93.8. The baselines' best rates sit at the bottom of the grid, so their scores may be slightly
+low; one seed, so differences under about 0.5 are noise. Masked-byte loss (layer 2) under-predicts
+these gaps, so use the tasks, not the loss, to judge pretraining changes.
 
 ## 6. Datasets
 
