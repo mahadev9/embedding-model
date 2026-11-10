@@ -48,6 +48,11 @@ ISO1 = {
 }  # fmt: skip
 ISO1_ALT = {"zh": "zh", "cmn": "zh", "ar": "ar", "arb": "ar"}
 
+SCRIPT = {
+    "eng": "Latn", "cmn": "Hans", "spa": "Latn", "fra": "Latn", "deu": "Latn", "por": "Latn",
+    "rus": "Cyrl", "jpn": "Jpan", "arb": "Arab", "hin": "Deva", "kor": "Hang", "ita": "Latn",
+}  # fmt: skip
+
 SUBSET = {
     "BitextMining": ["Tatoeba", "NTREXBitextMining"],
     "Classification": [
@@ -102,7 +107,7 @@ class OursEncoder:
             name=f"ours/{spec}",
             revision="local",
             release_date=None,
-            languages=[f"{ISO1[c]}-Latn" for c in LANGS],
+            languages=[f"{c}-{SCRIPT[c]}" for c in LANGS],
             n_parameters=n_params,
             memory_usage_mb=None,
             max_tokens=max_len,
@@ -147,9 +152,17 @@ class OursEncoder:
                 out[j] = emb[r]
         return np.stack(out)
 
-    def similarity(self, a, b):
-        a, b = torch.as_tensor(a), torch.as_tensor(b)
+    def similarity(self, embeddings1, embeddings2):
+        """Cosine similarity matrix (our embeddings are L2-normalized)."""
+        a = torch.as_tensor(embeddings1, dtype=torch.float32).reshape(-1, embeddings1.shape[-1])
+        b = torch.as_tensor(embeddings2, dtype=torch.float32).reshape(-1, embeddings2.shape[-1])
         return a @ b.T
+
+    def similarity_pairwise(self, embeddings1, embeddings2):
+        """Cosine similarity of corresponding rows."""
+        a = torch.as_tensor(embeddings1, dtype=torch.float32).reshape(-1, embeddings1.shape[-1])
+        b = torch.as_tensor(embeddings2, dtype=torch.float32).reshape(-1, embeddings2.shape[-1])
+        return (a * b).sum(dim=-1)
 
 
 def load_model(spec: str, args):
