@@ -126,7 +126,10 @@ class CorpusReader:
 
 
 class Prefetcher:
-    """Runs a batch generator on a background thread so disk reads overlap with the GPU."""
+    """Runs a batch generator on a background thread so disk reads overlap with the GPU.
+
+    Tensors are pinned for fast transfer; any other batch object is passed through unchanged.
+    """
 
     def __init__(self, iterator: Iterator[torch.Tensor], depth: int = 6) -> None:
         self._queue: queue.Queue = queue.Queue(maxsize=depth)
@@ -136,7 +139,7 @@ class Prefetcher:
     def _run(self, iterator: Iterator[torch.Tensor]) -> None:
         try:
             for batch in iterator:
-                self._queue.put(batch.pin_memory())
+                self._queue.put(batch.pin_memory() if hasattr(batch, "pin_memory") else batch)
         except BaseException as err:  # surfaced to the consumer
             self._error = err
         self._queue.put(None)
