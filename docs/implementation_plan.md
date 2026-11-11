@@ -604,9 +604,9 @@ same seed and data stream for every run. Trunk A is named `main-lr1.6e-3`, trunk
 | 3b | Branch from B at 3B: decay 0.3B | 21 min | todo |
 | - | **Decision:** pick the peak rate from 2b, 2c, 3b (lowest decayed macro val loss at 3B) | | todo |
 | 4 | Continue trunk A (1.6e-3) from 3B to 10B (`--stop-at-tokens 1e10`) | 8.3 h | done: macro val 2.465 at 10B (undecayed), no plateau, max update RMS 2.04 |
-| 4b | Branches at 10B, token-matched: plain decay 1B (`decay-10.00B`), and optionally hold 4e-4 for 0.5B + decay 0.5B | 71 min each | plain decay done: 2.465 -> 2.348 at 11.0B (decayed 3B result was 2.612); hold variant running |
-| 5 | Continue the winning trunk from 10B to 20B | 11.8 h | todo |
-| 5b | Branch at 20B: decay 2B tokens (final 50M model) | 2.4 h | todo |
+| 4b | Branches at 10B, token-matched: plain decay 1B (`decay-10.00B`), and optionally hold 4e-4 for 0.5B + decay 0.5B | 71 min each | plain decay done: 2.465 -> 2.348 at 11.0B (decayed 3B result was 2.612); hold variant done: 2.351, no benefit over plain decay at matched tokens |
+| 5 | Continue the winning trunk from 10B to 20B | 11.8 h | done 2026-11-11: macro val 2.347 at 20B (undecayed), still falling about 0.008 per 1B, max update RMS 2.05 over 10-20B. Paused once at 16.14B and resumed exactly |
+| 5b | Branch at 20B: decay 2B tokens (final 50M model) | 2.4 h | done: macro val 2.244 at 22.0B (`decay-20.00B`, the final 50M model), see 5.14 |
 
 Total about 32.5 h, one job on the GPU at a time. Both trunks are constant-rate runs, so the loser
 simply stops at 3B and the winner continues: nothing is restarted. What this answers: whether the
@@ -748,6 +748,52 @@ Same 17 tasks and subsets as 5.12 (percent):
 Caveats: single seed, single run each. The first probe-c evaluation stalled when the GPU driver hung
 (no output for over 2 hours); after a reboot with updated drivers the rerun resumed from mteb's cached
 tasks and finished normally.
+
+### 5.14 Final 50M model after 20B tokens: results (2026-11-11)
+
+**Model.** `decay-20.00B`: constant 1.6e-3 trunk to 20B tokens (`main-lr1.6e-3`), then a 2B-token 1-sqrt
+decay to zero, 22B tokens in total. The 20B trunk ran in two legs with one pause at 16.14B; the resume is
+exact (same data stream), loss and update RMS continued unchanged.
+
+**Validation loss (macro over 12 languages, lower is better).**
+
+| Model | Tokens | Decay | Loss |
+|---|---|---|---|
+| decay-3.00B | 3.3B | 0.3B | 2.612 |
+| decay-10.00B | 11.0B | 1B | 2.348 |
+| **decay-20.00B** | **22.0B** | **2B** | **2.244** |
+
+The undecayed trunk went 2.760 (3B), 2.465 (10B), 2.388 (15B), 2.347 (20B), about 0.008 per 1B at the end.
+The decay gain shrinks with horizon: -0.148 at 3B, -0.117 at 10B, -0.103 at 20B. All 12 languages improved
+(en 2.18, zh 3.00, es 2.01, fr 1.86, de 2.02, pt 2.04, ru 1.69, ja 2.64, ar 2.59, hi 2.16, ko 2.64, it 2.10).
+
+**Layer 2** (bits per masked byte, macro): 20B model 1.276 (mask 15%) and 1.442 (30%), against 1.308 and
+1.469 for the 10B model.
+
+**Layer 3** (English fine-tune, zero-shot average test over languages, best rate by English dev):
+
+| Task | 10B model | 20B model |
+|---|---|---|
+| XNLI | 65.8 | 66.3 |
+| PAWS-X | 80.3 | 80.0 |
+| WikiANN | 51.7 | 51.0 |
+
+All three differences are within single-seed noise (about 0.5).
+
+**Layer 4** (`probe-d`: the probe-a recipe, WebFAQ only, CLS, started from the 20B model; WebFAQ validation
+MRR 0.674, identical to probe-a). 17-task benchmark, task-type means (percent):
+
+| | Bitext | Classif. | Cluster | Pair | Retrieval | STS | Macro |
+|---|---|---|---|---|---|---|---|
+| probe-a (10B model) | 53.8 | 59.1 | 41.0 | 55.9 | 47.4 | 63.3 | 53.4 |
+| probe-d (20B model) | 56.7 | 60.0 | 40.8 | 56.7 | 48.0 | 63.3 | 54.3 |
+
+**Reading.** Doubling the MLM tokens (about 12 GPU hours) gave about +0.9 macro on the embedding benchmark,
+mostly bitext mining (+2.9; Tatoeba 59.3 to 61.2, NTREX 48.3 to 52.2). 13 of 17 tasks rose, 11 of 12
+languages rose, but single tasks are within noise and the layer 3 probes are flat. The parallel-pair mix gave
++2.4 macro for a 25-minute fine-tune (5.13), so the lever is the pair stage, not more MLM tokens. This
+supports the proposal in 4.2. Caveats: single seed per run; MLM loss improved 0.10 while downstream moved
+little, so loss alone is a weak guide at this size.
 
 ## 6. Datasets
 
