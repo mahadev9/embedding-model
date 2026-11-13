@@ -34,7 +34,12 @@ BASELINES = {
     "e5-base": "intfloat/multilingual-e5-base",
     "granite-97m": "ibm-granite/granite-embedding-97m-multilingual-r2",
     "gemma-300m": "google/embeddinggemma-300m",
+    "e5-small-v2": "intfloat/e5-small-v2",
+    "bge-small-en": "BAAI/bge-small-en-v1.5",
+    "minilm-l6": "sentence-transformers/all-MiniLM-L6-v2",
+    "minilm-l12": "sentence-transformers/all-MiniLM-L12-v2",
 }
+DEFAULT_BASELINES = ["e5-small", "e5-base", "granite-97m", "gemma-300m"]
 
 
 def side_lang(side: str) -> tuple[str | None, str | None]:
@@ -96,7 +101,12 @@ def main() -> None:
     )
     parser.add_argument("--ours", nargs="+", required=True, help="our result dirs under results/")
     parser.add_argument("--out", default="mmteb_compare.md")
+    parser.add_argument(
+        "--baselines", nargs="+", choices=list(BASELINES), default=DEFAULT_BASELINES,
+        help="baseline models to include (names from BASELINES)",
+    )  # fmt: skip
     args = parser.parse_args()
+    baselines = {k: BASELINES[k] for k in args.baselines}
 
     tasks = get_subset(ALL_TASKS)
     types = {t.metadata.name: t.metadata.type for t in tasks}
@@ -105,10 +115,10 @@ def main() -> None:
         keep = {s for s in t.hf_subsets if parse_subset(s) is not None}
         wanted[t.metadata.name] = keep
 
-    public = load_public(BASELINES, tasks)
+    public = load_public(baselines, tasks)
     scores: dict[str, dict[str, dict[str, float]]] = {}
     source: dict[str, dict[str, set[str]]] = {}
-    for short, full in BASELINES.items():
+    for short, full in baselines.items():
         merged = {t: dict(v) for t, v in public.get(short, {}).items()}
         local = load_local(full.replace("/", "__"))
         src: dict[str, set[str]] = {}
