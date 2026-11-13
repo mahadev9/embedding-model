@@ -1,7 +1,20 @@
-# embedding-model
+# Loom (loom-embed)
 
 From-scratch multilingual text embedding models (50M / 100M / 200M non-embedding parameters), built on a
-single RTX 5090. See [docs/implementation_plan.md](docs/implementation_plan.md) for the research and plan.
+single RTX 5090. Languages: English, Chinese, Spanish, French, German, Portuguese, Russian, Japanese,
+Arabic, Hindi, Korean, Italian. See [docs/implementation_plan.md](docs/implementation_plan.md) for the
+research, plan and all measured results.
+
+Loom is not affiliated with the Loom video product.
+
+## Status
+
+The 50M pipeline runs end to end: tokenizer, MLM pretraining (constant-rate trunk plus decay branches),
+contrastive fine-tuning, and a four-layer evaluation (MLM loss, fine-tuning probes, a 17-task MMTEB
+subset). Results so far are in sections 5.9 to 5.14 of the plan. The embedding model is still a probe:
+about 11 to 13 points below multilingual-e5-small on our benchmark, and well behind English-only small
+models on English. Large-scale pair pretraining and distillation (plan section 4.2) come next. No model
+weights are published yet.
 
 ## Setup
 
@@ -37,6 +50,16 @@ export EMBEDDING_TOKENIZED_DIR=/mnt/hdd-2tb/embedding-model/tokenized
 export EMBEDDING_RUNS_DIR=/mnt/hdd-2tb/embedding-model/runs
 
 python -m src.training.mlm --config configs/train/mlm_50m.yaml --run-name my-run   # MLM pretraining
+python -m src.training.branch --from-run RUN --label 20.00B --name NAME --decay-tokens 2e9   # decay branch
+
+python -m src.data.build_pairs --per-language 100000    # WebFAQ question-answer pairs
+python -m src.data.build_parallel --per-pair 40000      # WikiMatrix translation pairs
+python -m src.training.contrastive --config configs/train/contrastive_50m.yaml --run-name probe
+
+python -m src.eval.mlm_crossmodel --models ours:RUN/latest.pt hf:jhu-clsp/mmBERT-small   # needs ".[eval]"
+python -m src.eval.finetune --models ours:RUN/latest.pt --tasks xnli paws ner
+python -m src.eval.mmteb --models ours:RUN/latest.pt    # 17-task MMTEB subset
+python -m src.eval.compare --ours ours__RUN__latest.pt  # compare with public baselines
 
 ruff format src && ruff check src               # format and lint
 ```
