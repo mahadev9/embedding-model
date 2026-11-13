@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "embedding-model"
 version = "0.1.0"
-description = "From-scratch multilingual text embedding models (50M / 100M / 200M) trained on one RTX 5090"
+description = "From-scratch multilingual text embedding models (50M and 200M) trained on one RTX 5090"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [

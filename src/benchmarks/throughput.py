@@ -3,7 +3,7 @@ Throughput benchmarks for an RTX 5090 (sm_120): attention kernels and encoder tr
 
 Examples:
     python -m src.benchmarks.throughput attention
-    python -m src.benchmarks.throughput train --sizes 50M 100M --tokens-per-batch 65536
+    python -m src.benchmarks.throughput train --sizes 50M 200M --tokens-per-batch 65536
     python -m src.benchmarks.throughput train --sizes 200M --tokens-per-batch 16384
 """
 
@@ -114,7 +114,6 @@ class EncoderConfig:
 # Starting-point configs; see the architecture notes in the project plan.
 CONFIGS: dict[str, EncoderConfig] = {
     "50M": EncoderConfig(hidden=384, layers=22, heads=6, ffn=1536),
-    "100M": EncoderConfig(hidden=576, layers=22, heads=9, ffn=1728),
     "200M": EncoderConfig(hidden=768, layers=26, heads=12, ffn=2304),
 }
 

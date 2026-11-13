@@ -1,4 +1,4 @@
-# Multilingual Embedding Models (50M / 100M / 200M): Implementation Plan
+# Multilingual Embedding Models (50M and 200M): Implementation Plan
 
 Educational project: build three from-scratch multilingual text-embedding models on one RTX 5090 (32 GB),
 aiming to be the best of their size class. This document records the research behind each design choice,
@@ -18,11 +18,11 @@ depending on them.
 
 | Topic | Decision |
 |---|---|
-| Sizes | 50M, 100M, 200M **non-embedding** parameters. 200M is the main target, 100M is optional and last |
+| Sizes | 50M and 200M **non-embedding** parameters. 200M is the main target (a 100M size was dropped 2026-11-13) |
 | Start with | **50M**: a cheap end-to-end pipeline test and the platform for ablations |
 | Languages | 12 languages (confirmed by user): en, zh, es, fr, de, pt, ru, ja, ar, hi, ko, it |
 | Tokenizer | Custom byte-level BPE, shared by all sizes. **96,000-token vocabulary** (decided 2026-11-07, see 10.5) |
-| Output embedding | 768 dimensions for 100M and 200M, 384 for 50M; Matryoshka (MRL) so it can be truncated (768/512/256/128, or 384/256/128/64 for the 50M) |
+| Output embedding | 768 dimensions for the 200M, 384 for the 50M; Matryoshka (MRL) so it can be truncated (768/512/256/128, or 384/256/128/64 for the 50M) |
 | Context | Train short, extend to 8192. 32k only via inference-time RoPE scaling if wanted |
 | Architecture family | Dense bidirectional encoder, ModernBERT-style, trained from scratch |
 | Reranker | Phase 2, after the embedder works |
@@ -105,7 +105,7 @@ All items below are from the ModernBERT paper unless marked.
 | Dimensions | Multiples of 64, head dim 64, vocabulary a multiple of 64 | Tensor-core efficiency |
 | Padding | Padding-free: pack documents and mask across them | See 5.2 for the kernel choice |
 | Pooling | Test **CLS vs mean** at 50M | mGTE and BGE-M3 use CLS |
-| Output head | Linear projection to `output_dim` where it differs from the hidden size (100M only: 576 to 768), then L2 normalize. The 50M and 200M need no projection | MRL applied to the output vector |
+| Output head | Linear projection to `output_dim` where it differs from the hidden size, then L2 normalize. The 50M and 200M need no projection | MRL applied to the output vector |
 
 ### 3.2 Starting configurations
 
@@ -115,7 +115,6 @@ Parameter counts are non-embedding, computed from my formula
 | Model | Hidden | Layers | Heads | GeGLU intermediate | Non-emb params | Embedding table (96k vocab) | Total params |
 |---|---|---|---|---|---|---|
 | 50M | 384 | 22 | 6 | 1536 | ~52M | ~37M | ~89M |
-| 100M | 576 | 22 | 9 | 1728 | ~95M | ~55M | ~151M |
 | 200M | 768 | 26 | 12 | 2304 | ~200M | ~74M | ~273M |
 
 For comparison, mmBERT-small is 384 hidden, 22 layers, 1152 intermediate (42M non-embedding), and
@@ -277,7 +276,7 @@ comparison (distill vs contrastive-only vs both) is the project's central experi
   in-batch similarity matrices *(mine)*, and optionally EmbeddingGemma's spread-out regularizer. If the
   student's output size differs from the teacher's, do not add a training-only head (see Targets below).
 - **Targets (no projection head):** cache the teacher's embeddings once at 768 dims, fp16 (the 0.6B teacher's
-  native 1024, truncated and re-normalized). The 100M and 200M match the 768-dim vector directly. The 50M
+  native 1024, truncated and re-normalized). The 200M matches the 768-dim vector directly. The 50M
   matches the first 384 dims, re-normalized. The student's nested Matryoshka sizes match the same-size
   prefixes of the teacher vector, re-normalized. So the vector you ship is exactly the vector you trained,
   and the 384-dim targets cost nothing extra to store.
@@ -438,9 +437,9 @@ avoid partial FlexAttention blocks.
 | MLM loss at initialization | 11.15 (ln 64000 = 11.07) |
 | Embedding output and Matryoshka truncation (768 and 128 dims) | unit norm at both |
 | `encode_packed` vs padded `forward`, CLS and mean pooling | max difference ~3e-8 |
-| Last layer is global on 50M, 100M and 200M | confirmed |
+| Last layer is global on 50M and 200M | confirmed |
 | Graph breaks in the compiled MLM step (varying masked counts) | none |
-| Parameter count vs `ModelConfig` | exact match for 50M, 100M, 200M |
+| Parameter count vs `ModelConfig` | exact match for 50M and 200M |
 
 **MLM training throughput, real model** (bf16, `torch.compile`, packed documents, 30% masked,
 `python -m src.benchmarks.model_throughput`):
@@ -907,7 +906,7 @@ text bytes, so no language dominates the vocabulary.
    at truncated dimensions (gating check), cache teacher embeddings, distillation loop, evaluation harness with all baselines.
 6. **M5 Contrastive pipeline and ablations at 50M**: hard-negative mining, MRL, GradCache baseline run,
    distill vs contrastive vs both, merging.
-7. **M6 Scale to 200M** with the best recipe. 100M if time allows.
+7. **M6 Scale to 200M** with the best recipe.
 8. **M7 Reranker.**
 
 ---
@@ -1012,8 +1011,8 @@ Plan for the tokenizer step:
 - **Size classes, by non-embedding parameters** *(mine, from vocabulary x hidden size)*: multilingual-e5-small
   is 118M total but about 96M of that is its 250k-token embedding table (about 21M non-embedding).
   multilingual-e5-base and gte-multilingual-base have roughly 86M and 113M non-embedding parameters, and
-  EmbeddingGemma-300m about 107M. So our 100M model has a similar transformer body to the "300M-class"
-  models, and our 200M has about twice the body, with a total of about 250M. State both numbers when
+  EmbeddingGemma-300m about 107M. So our 200M model has about twice the transformer body of the "300M-class"
+  models, with a total of about 250M. State both numbers when
   comparing ("200M non-embedding, ~250M total").
 - **Runtime:** MMTEB reports up to two days on one A100 for moderate LLMs on the original English benchmark,
   and uses downsampling to cut cost. A small model's runtime is unknown. Time one on a few tasks first.
@@ -1202,7 +1201,7 @@ test or plan change), **open** (needs your decision).
 
 | # | Finding | Status | What I did |
 |---|---|---|---|
-| 1 | 200M (26 layers) ends on a local layer, so the final CLS token sees only +-64 tokens | **confirmed** (layer 25 was local; 50M and 100M end global) | Last layer is now always global, for any depth. 200M has 10 global layers |
+| 1 | 200M (26 layers) ends on a local layer, so the final CLS token sees only +-64 tokens | **confirmed** (layer 25 was local; the 50M ends global) | Last layer is now always global, for any depth. 200M has 10 global layers |
 | 2 | `EmbeddingModel` pads short texts to 128-token blocks | **confirmed** | Added `encode_packed` (CLS and mean pooling), equal to the padded path within 3e-8 |
 | 3 | Padded inputs not rounded to 128 | **partly**: lengths 100 and 300 work and match padded-to-128 within 1e-6, so it is not a correctness bug | No code change. Packing removes the efficiency concern. Docstring corrected |
 | 4 | `hidden[masked]` has a data-dependent shape and recompiles | **confirmed**, and worse: block-mask construction inside the compiled region also graph-broke | Fixed-count masked positions (`select_masked`), masks built outside compile. My earlier benchmark reused one label count and hid this |
@@ -1219,15 +1218,14 @@ test or plan change), **open** (needs your decision).
 | 3 | Many more pretraining tokens for the 50M | **accepted as a test** | Plausible, since competitors saw trillions. Unproven for this setup. Ablation 8 in 3.3 measures the 30B vs 100B slope first |
 | 4 | Add parallel pairs for bitext mining | **accepted** | mGTE also used translation pairs. The Salesforce result concerned retrieval only. Parallel data is now included, filtered, and weighted among our 12 languages |
 | 5 | Pretrain at 8192 from the start | **accepted as an ablation** | Ablation 7 in 3.3 |
-| 6 | muP or depth-aware muP for transfer | **open** | CompleteP (depth-aware muP) and Completed(d)P exist and report transfer across width and depth, with 12–34% compute efficiency gains, but on decoder LLMs. Completed(d)P also reports that optimal hyperparameters do not transfer across training duration out of the box. Untested for MLM encoders, so a short 50M-to-100M check would come first |
+| 6 | muP or depth-aware muP for transfer | **open** | CompleteP (depth-aware muP) and Completed(d)P exist and report transfer across width and depth, with 12–34% compute efficiency gains, but on decoder LLMs. Completed(d)P also reports that optimal hyperparameters do not transfer across training duration out of the box. Untested for MLM encoders, so a short 50M-to-200M check would come first |
 | 7 | Muon as a late ablation | **accepted** | Unchanged |
 
 ### 11.3 Decision: 50M output dimension (resolved: option B)
 
 The 50M has hidden size 384, so a 768-dim output would be a rank-384 projection: twice the storage for the
 same information. IBM's 97M granite model also uses 384-dim output. Decided: the **50M outputs 384**
-(Matryoshka 384/256/128/64) with no projection layer, and the 100M and 200M stay at 768. The 100M (hidden
-576) is rank-limited to 576 by the same argument, to a smaller degree, and keeps 768 for now. During
+(Matryoshka 384/256/128/64) with no projection layer, and the 200M stays at 768. During
 distillation the teacher targets are Matryoshka-truncated prefixes of its embedding, so no training-only head
 is needed (see Stage 4 for the gating check).
 

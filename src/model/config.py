@@ -144,7 +144,7 @@ class ModelConfig:
 
 
 def load_model_config(name_or_path: str | Path) -> ModelConfig:
-    """Load by size name ('50m', '100m', '200m') from configs/model/, or by explicit path."""
+    """Load by size name ('50m', '200m') from configs/model/, or by explicit path."""
     path = Path(name_or_path)
     if not path.suffix:
         path = Path(__file__).resolve().parents[2] / "configs" / "model" / f"{path.name}.yaml"
@@ -154,5 +154,5 @@ def load_model_config(name_or_path: str | Path) -> ModelConfig:
 if __name__ == "__main__":
     import sys
 
-    for arg in sys.argv[1:] or ["50m", "100m", "200m"]:
+    for arg in sys.argv[1:] or ["50m", "200m"]:
         print(load_model_config(arg).summary())

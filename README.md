@@ -1,6 +1,6 @@
 # Loom (loom-embed)
 
-From-scratch multilingual text embedding models (50M / 100M / 200M non-embedding parameters), built on a
+From-scratch multilingual text embedding models (50M and 200M non-embedding parameters), built on a
 single RTX 5090. Languages: English, Chinese, Spanish, French, German, Portuguese, Russian, Japanese,
 Arabic, Hindi, Korean, Italian. See [docs/implementation_plan.md](docs/implementation_plan.md) for the
 research, plan and all measured results.
